@@ -265,9 +265,12 @@ async function sendConsoleCommand(serverId, command) {
 }
 
 async function decompressFile(serverId, targetFile) {
+  const rootDir = path.dirname(targetFile);
+  const fileName = path.basename(targetFile);
+  const apiRoot = rootDir === '.' ? '/' : rootDir;
   await axios.post(`/api/client/servers/${serverId}/files/decompress`, {
-    root: "/",
-    file: targetFile,
+    root: apiRoot,
+    file: fileName,
   });
 }
 
