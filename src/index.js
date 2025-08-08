@@ -34,6 +34,9 @@ async function main() {
 
     for (const serverId of serverIds) {
       core.debug(`Uploading to server ${serverId}`);
+      if (settings.deleteFilesInDir && targetPath.endsWith("/")) {
+        await deleteAllFilesInDirectory(serverId, targetPath);
+      }
       for (const source of fileSourcePaths) {
         core.debug(`Processing source ${source}`);
         await validateSourceFile(source);
@@ -86,6 +89,7 @@ async function getSettings() {
   const command = getInput("command");
   const proxy = getInput("proxy");
   const decompressTarget = getInput("decompress-target") == "true";
+  const deleteFilesInDir = getInput("delete-files-in-dir") == "true";
   const followSymbolicLinks = getInput("follow-symbolic-links") == "true";
 
   let sourcePath = getInput("source");
@@ -152,6 +156,7 @@ async function getSettings() {
     serverIds,
     targets,
     decompressTarget,
+    deleteFilesInDir,
     followSymbolicLinks,
   };
 }
@@ -167,13 +172,6 @@ function configureAxios(panelHost, apiKey, proxy) {
     const [username, password] = auth.split(":");
     const [host, port] = hostPort.split(":");
 
-    // axios.defaults.proxy = {
-    //   protocol: "http",
-    //   host,
-    //   port,
-    //   auth: { username, password },
-    // };
-
     const httpsAgent = tunnel.httpsOverHttp({
       proxy: {
         host: host,
@@ -182,7 +180,7 @@ function configureAxios(panelHost, apiKey, proxy) {
       },
     });
 
-    var httpAgent = tunnel.httpOverHttp({
+    let httpAgent = tunnel.httpOverHttp({
       proxy: {
         host: host,
         port: port,
@@ -222,7 +220,7 @@ async function uploadFile(serverId, targetFile, buffer) {
   let uploaded = false;
   while (!uploaded && retries < 3) {
     try {
-      response = await axios.post(
+      let response = await axios.post(
         `/api/client/servers/${serverId}/files/write`,
         buffer,
         {
@@ -282,6 +280,25 @@ async function deleteFile(serverId, targetFile) {
       files: [targetFile],
     }
   );
+
+async function deleteAllFilesInDirectory(serverId, targetPath) {
+  core.info(`Deleting all files in ${targetPath} on server ${serverId}`);
+  const response = await axios.get(`/api/client/servers/${serverId}/files/list`, {
+    params: { targetPath },
+  });
+  const fileNames = response.data
+    .filter(item => item.mode !== 'targetPath')
+    .map(item => path.posix.join(targetPath, item.name));
+  if (fileNames.length === 0) {
+    core.info(`No files to delete in ${targetPath}`);
+    return;
+  }
+  await axios.post(`/api/client/servers/${serverId}/files/delete`, {
+    root: targetPath,
+    files: fileNames.map(f => path.posix.basename(f)), // Pterodactyl expects relative to root
+  });
+  core.info(`Deleted ${fileNames.length} files from ${targetPath}`);
+}
 
   // check if the response was 403 (forbidden), try again until the max retries is reached
   let retries = 0;
