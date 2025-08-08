@@ -52,6 +52,8 @@ jobs:
           # restart: true
           # If you want to decompress the files after successful upload
           # decompress-target: true
+          # If you want to remove all files from target folder before upload
+          # delete-files-in-dir: true
 ```
 
 ## File Decompression

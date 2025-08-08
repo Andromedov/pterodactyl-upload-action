@@ -36,7 +36,7 @@ inputs:
     description: "Decompress archive file after upload in target"
     required: false
     default: false
-  deleteFilesInDir:
+  delete-files-in-dir:
     description: "Delete all files in target folder"
     required: false
     default: false
