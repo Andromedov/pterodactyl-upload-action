@@ -1,7 +1,7 @@
 # Pterodactyl Upload Action
 
-![GitHub release (latest by date)](https://img.shields.io/github/v/release/rexlmanu/pterodactyl-upload-action)
-![GitHub](https://img.shields.io/github/license/rexlmanu/pterodactyl-upload-action)
+![GitHub release (latest by date)](https://img.shields.io/github/v/release/Andromedov/pterodactyl-upload-action)
+![GitHub](https://img.shields.io/github/license/Andromedov/pterodactyl-upload-action)
 
 This GitHub Action allows you to upload files to multiple Pterodactyl servers with just one action, featuring socket support.
 
@@ -20,7 +20,12 @@ You have to create a client api key in the pterodactyl panel. You can do this in
 5. `source`: Source file to be uploaded.
 6. `sources`: Source files to be uploaded (multiline).
 7. `target`: Destination of the file on the server. Can be a file name (for a single source) or a directory name ending with a slash (for multiple files).
-8. `proxy`: Proxy to be used for upload (username:password@host:port).
+8. `restart`: Restarts the server after successful upload.
+9. `command`: Execute command at server after successful upload.
+10. `proxy`: Proxy to be used for upload (username:password@host:port).
+11. `decompress-target`: Decompress archive file after upload in target.
+12. `delete-files-in-dir`: Delete all files in target folder.
+12. `follow-symbolic-links`: Indicates whether to follow symbolic links.
 
 All file inputs support glob patterns.
 
@@ -33,9 +38,9 @@ jobs:
     name: Deploy to Pterodactyl
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4.2.2
       - run: echo "Hello world" > hello.txt
-      - uses: rexlmanu/pterodactyl-upload-action@v2.1
+      - uses: Andromedov/pterodactyl-upload-action@v2.5.2
         with:
           panel-host: ${{ secrets.PANEL_HOST }}
           api-key: ${{ secrets.API_KEY }}
