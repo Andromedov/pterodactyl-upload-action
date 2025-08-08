@@ -273,45 +273,71 @@ async function decompressFile(serverId, targetFile) {
 }
 
 async function deleteFile(serverId, targetFile) {
-  let response = await axios.post(
-    `/api/client/servers/${serverId}/files/delete`,
-    {
-      root: "/",
-      files: [targetFile],
+  // check if the response was 403 (forbidden), try again until the max retries is reached
+  let retries = 0;
+  let response;
+  
+  do {
+    try {
+      response = await axios.post(
+        `/api/client/servers/${serverId}/files/delete`,
+        {
+          root: "/",
+          files: [targetFile],
+        }
+      );
+      
+      if (response.status === 204) {
+        core.info(`Successfully deleted ${targetFile}`);
+        return;
+      }
+    } catch (error) {
+      if (error.response?.status === 403 && retries < 2) {
+        core.info(`Delete failed with 403, retrying... (attempt ${retries + 1})`);
+        retries++;
+        continue;
+      }
+      throw error;
     }
-  );
+  } while (retries < 3);
+}
 
 async function deleteAllFilesInDirectory(serverId, targetPath) {
   core.info(`Deleting all files in ${targetPath} on server ${serverId}`);
-  const response = await axios.get(`/api/client/servers/${serverId}/files/list`, {
-    params: { targetPath },
-  });
-  const fileNames = response.data
-    .filter(item => item.mode !== 'targetPath')
-    .map(item => path.posix.join(targetPath, item.name));
-  if (fileNames.length === 0) {
-    core.info(`No files to delete in ${targetPath}`);
-    return;
-  }
-  await axios.post(`/api/client/servers/${serverId}/files/delete`, {
-    root: targetPath,
-    files: fileNames.map(f => path.posix.basename(f)), // Pterodactyl expects relative to root
-  });
-  core.info(`Deleted ${fileNames.length} files from ${targetPath}`);
-}
-
-  // check if the response was 403 (forbidden), try again until the max retries is reached
-  let retries = 0;
-  while (response.status === 403 && retries < 3) {
-    core.info(`Delete failed, retrying...`);
-    response = await axios.post(
-      `/api/client/servers/${serverId}/files/delete`,
-      {
-        root: "/",
-        files: [targetFile],
-      }
-    );
-    retries++;
+  
+  try {
+    // Fix the API endpoint - use 'directory' parameter, not 'targetPath'
+    const response = await axios.get(`/api/client/servers/${serverId}/files/list`, {
+      params: { directory: targetPath },
+    });
+    
+    // Fix the filtering logic - check for files vs directories properly
+    const files = response.data.data || response.data; // Handle different API response structures
+    const fileNames = files
+      .filter(item => item.attributes ? !item.attributes.is_directory : !item.is_directory)
+      .map(item => {
+        const name = item.attributes ? item.attributes.name : item.name;
+        return name;
+      });
+    
+    if (fileNames.length === 0) {
+      core.info(`No files to delete in ${targetPath}`);
+      return;
+    }
+    
+    // Delete files with proper root directory
+    await axios.post(`/api/client/servers/${serverId}/files/delete`, {
+      root: targetPath,
+      files: fileNames,
+    });
+    
+    core.info(`Deleted ${fileNames.length} files from ${targetPath}`);
+  } catch (error) {
+    core.error(`Failed to delete files in directory: ${error.message}`);
+    if (error.response) {
+      core.debug(`API Error: ${JSON.stringify(error.response.data)}`);
+    }
+    throw error;
   }
 }
 

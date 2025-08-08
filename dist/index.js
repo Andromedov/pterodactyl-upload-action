@@ -11952,6 +11952,7 @@ async function main() {
       sourceListPath,
       targetPath,
       restart,
+      command,
       targets,
       decompressTarget,
     } = settings;
@@ -11967,6 +11968,9 @@ async function main() {
 
     for (const serverId of serverIds) {
       core.debug(`Uploading to server ${serverId}`);
+      if (settings.deleteFilesInDir && targetPath.endsWith("/")) {
+        await deleteAllFilesInDirectory(serverId, targetPath);
+      }
       for (const source of fileSourcePaths) {
         core.debug(`Processing source ${source}`);
         await validateSourceFile(source);
@@ -12002,6 +12006,7 @@ async function main() {
         }
       }
 
+      if (command != "") await sendConsoleCommand(serverId, command);
       if (restart) await restartServer(serverId);
     }
 
@@ -12015,8 +12020,10 @@ async function getSettings() {
   const panelHost = getInput("panel-host", { required: true });
   const apiKey = getInput("api-key", { required: true });
   const restart = getInput("restart") == "true";
+  const command = getInput("command");
   const proxy = getInput("proxy");
   const decompressTarget = getInput("decompress-target") == "true";
+  const deleteFilesInDir = getInput("delete-files-in-dir") == "true";
   const followSymbolicLinks = getInput("follow-symbolic-links") == "true";
 
   let sourcePath = getInput("source");
@@ -12027,6 +12034,7 @@ async function getSettings() {
 
   // Debug print out all the inputs
   core.debug(`restart: ${restart}`);
+  core.debug(`command: ${command}`);
   core.debug(`source: ${sourcePath}`);
   core.debug(`sources: ${sourceListPath}`);
   core.debug(`target: ${targetPath}`);
@@ -12075,12 +12083,14 @@ async function getSettings() {
     panelHost,
     apiKey,
     restart,
+    command,
     proxy,
     sourceListPath,
     targetPath,
     serverIds,
     targets,
     decompressTarget,
+    deleteFilesInDir,
     followSymbolicLinks,
   };
 }
@@ -12096,13 +12106,6 @@ function configureAxios(panelHost, apiKey, proxy) {
     const [username, password] = auth.split(":");
     const [host, port] = hostPort.split(":");
 
-    // axios.defaults.proxy = {
-    //   protocol: "http",
-    //   host,
-    //   port,
-    //   auth: { username, password },
-    // };
-
     const httpsAgent = tunnel.httpsOverHttp({
       proxy: {
         host: host,
@@ -12111,7 +12114,7 @@ function configureAxios(panelHost, apiKey, proxy) {
       },
     });
 
-    var httpAgent = tunnel.httpOverHttp({
+    let httpAgent = tunnel.httpOverHttp({
       proxy: {
         host: host,
         port: port,
@@ -12151,7 +12154,7 @@ async function uploadFile(serverId, targetFile, buffer) {
   let uploaded = false;
   while (!uploaded && retries < 3) {
     try {
-      response = await axios.post(
+      let response = await axios.post(
         `/api/client/servers/${serverId}/files/write`,
         buffer,
         {
@@ -12187,6 +12190,12 @@ async function restartServer(serverId) {
   });
 }
 
+async function sendConsoleCommand(serverId, command) {
+  await axios.post(`/api/client/servers/${serverId}/command`, {
+    command: command,
+  });
+}
+
 async function decompressFile(serverId, targetFile) {
   const rootDir = path.dirname(targetFile);
   const fileName = path.basename(targetFile);
@@ -12198,26 +12207,71 @@ async function decompressFile(serverId, targetFile) {
 }
 
 async function deleteFile(serverId, targetFile) {
-  let response = await axios.post(
-    `/api/client/servers/${serverId}/files/delete`,
-    {
-      root: "/",
-      files: [targetFile],
-    }
-  );
-
   // check if the response was 403 (forbidden), try again until the max retries is reached
   let retries = 0;
-  while (response.status === 403 && retries < 3) {
-    core.info(`Delete failed, retrying...`);
-    response = await axios.post(
-      `/api/client/servers/${serverId}/files/delete`,
-      {
-        root: "/",
-        files: [targetFile],
+  let response;
+  
+  do {
+    try {
+      response = await axios.post(
+        `/api/client/servers/${serverId}/files/delete`,
+        {
+          root: "/",
+          files: [targetFile],
+        }
+      );
+      
+      if (response.status === 204) {
+        core.info(`Successfully deleted ${targetFile}`);
+        return;
       }
-    );
-    retries++;
+    } catch (error) {
+      if (error.response?.status === 403 && retries < 2) {
+        core.info(`Delete failed with 403, retrying... (attempt ${retries + 1})`);
+        retries++;
+        continue;
+      }
+      throw error;
+    }
+  } while (retries < 3);
+}
+
+async function deleteAllFilesInDirectory(serverId, targetPath) {
+  core.info(`Deleting all files in ${targetPath} on server ${serverId}`);
+  
+  try {
+    // Fix the API endpoint - use 'directory' parameter, not 'targetPath'
+    const response = await axios.get(`/api/client/servers/${serverId}/files/list`, {
+      params: { directory: targetPath },
+    });
+    
+    // Fix the filtering logic - check for files vs directories properly
+    const files = response.data.data || response.data; // Handle different API response structures
+    const fileNames = files
+      .filter(item => item.attributes ? !item.attributes.is_directory : !item.is_directory)
+      .map(item => {
+        const name = item.attributes ? item.attributes.name : item.name;
+        return name;
+      });
+    
+    if (fileNames.length === 0) {
+      core.info(`No files to delete in ${targetPath}`);
+      return;
+    }
+    
+    // Delete files with proper root directory
+    await axios.post(`/api/client/servers/${serverId}/files/delete`, {
+      root: targetPath,
+      files: fileNames,
+    });
+    
+    core.info(`Deleted ${fileNames.length} files from ${targetPath}`);
+  } catch (error) {
+    core.error(`Failed to delete files in directory: ${error.message}`);
+    if (error.response) {
+      core.debug(`API Error: ${JSON.stringify(error.response.data)}`);
+    }
+    throw error;
   }
 }
 
