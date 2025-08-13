@@ -12266,11 +12266,30 @@ async function deleteFile(serverId, targetFile) {
 }
 
 /**
- * Filters files based on whitelist/blacklist mode
+ * Check if file matches pattern (supports glob patterns)
+ */
+function isFileMatch(fileName, pattern) {
+  if (!pattern.includes('*') && !pattern.includes('?')) {
+    // Exact match
+    return fileName === pattern;
+  }
+  
+  // Simple glob pattern matching
+  const regexPattern = pattern
+    .replace(/\./g, '\\.')
+    .replace(/\*/g, '.*')
+    .replace(/\?/g, '.');
+  
+  const regex = new RegExp(`^${regexPattern}$`, 'i');
+  return regex.test(fileName);
+}
+
+/**
+ * Filters files to get list of files that should be DELETED based on whitelist/blacklist mode
  * @param {Array} files - Array of file names
  * @param {string} filesType - "whitelist" or "blacklist"
  * @param {Array} filesList - Array of file names to include/exclude
- * @returns {Array} - Filtered array of file names
+ * @returns {Array} - Array of file names that should be DELETED
  */
 function filterFiles(files, filesType, filesList) {
   if (!filesList || filesList.length === 0) {
@@ -12278,32 +12297,15 @@ function filterFiles(files, filesType, filesList) {
     return filesType === "blacklist" ? files : [];
   }
 
-  // Support glob patterns in file names
-  const isMatch = (fileName, pattern) => {
-    if (!pattern.includes('*') && !pattern.includes('?')) {
-      // Exact match
-      return fileName === pattern;
-    }
-    
-    // Simple glob pattern matching
-    const regexPattern = pattern
-      .replace(/\./g, '\\.')
-      .replace(/\*/g, '.*')
-      .replace(/\?/g, '.');
-    
-    const regex = new RegExp(`^${regexPattern}$`, 'i');
-    return regex.test(fileName);
-  };
-
   if (filesType === "whitelist") {
-    // Keep only files that match the patterns in the list
+    // WHITELIST: Delete all files EXCEPT those that match the patterns (keep whitelist files)
     return files.filter(fileName =>
-      filesList.some(pattern => isMatch(fileName, pattern))
+      !filesList.some(pattern => isFileMatch(fileName, pattern))
     );
   } else {
-    // blacklist mode - remove files that match the patterns in the list
+    // BLACKLIST: Delete only files that match the patterns (delete blacklist files)
     return files.filter(fileName =>
-      !filesList.some(pattern => isMatch(fileName, pattern))
+      filesList.some(pattern => isFileMatch(fileName, pattern))
     );
   }
 }
@@ -12345,6 +12347,13 @@ async function deleteFilesInDirectory(serverId, targetPath, filesType = "blackli
     }
     
     core.info(`Files to delete (${filesType} mode): ${filesToDelete.join(', ')}`);
+    
+    if (filesType === "whitelist" && filesList.length > 0) {
+      const filesToKeep = allFileNames.filter(fileName =>
+        filesList.some(pattern => isFileMatch(fileName, pattern))
+      );
+      core.info(`Files to keep (whitelist): ${filesToKeep.join(', ')}`);
+    }
     
     // Delete the filtered files
     await axios.post(`/api/client/servers/${serverId}/files/delete`, {
