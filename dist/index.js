@@ -11969,7 +11969,7 @@ async function main() {
     for (const serverId of serverIds) {
       core.debug(`Uploading to server ${serverId}`);
       if (settings.deleteFilesInDir && targetPath.endsWith("/")) {
-        await deleteAllFilesInDirectory(serverId, targetPath);
+        await deleteFilesInDirectory(serverId, targetPath, settings.filesType, settings.filesList);
       }
       for (const source of fileSourcePaths) {
         core.debug(`Processing source ${source}`);
@@ -12025,6 +12025,26 @@ async function getSettings() {
   const decompressTarget = getInput("decompress-target") == "true";
   const deleteFilesInDir = getInput("delete-files-in-dir") == "true";
   const followSymbolicLinks = getInput("follow-symbolic-links") == "true";
+  const filesType = getInput("files-type") || "blacklist";
+  const filesListInput = getInput("files-list") || "";
+
+  // Parse files list - handle both multiline and comma-separated input
+  let filesList = [];
+  if (filesListInput) {
+    if (filesListInput.includes('\n')) {
+      // Multiline input
+      filesList = filesListInput
+        .split('\n')
+        .map(line => line.trim())
+        .filter(line => line.length > 0);
+    } else {
+      // Comma-separated input
+      filesList = filesListInput
+        .split(',')
+        .map(file => file.trim())
+        .filter(file => file.length > 0);
+    }
+  }
 
   let sourcePath = getInput("source");
   let sourceListPath = getMultilineInput("sources");
@@ -12040,6 +12060,8 @@ async function getSettings() {
   core.debug(`target: ${targetPath}`);
   core.debug(`server-id: ${serverIdInput}`);
   core.debug(`server-ids: ${serverIds}`);
+  core.debug(`files-type: ${filesType}`);
+  core.debug(`files-list: ${JSON.stringify(filesList)}`);
 
   const config = await readConfigFile();
 
@@ -12062,6 +12084,11 @@ async function getSettings() {
   core.debug(`target: ${targetPath}`);
   core.debug(`server-id: ${serverIdInput}`);
   core.debug(`server-ids: ${serverIds}`);
+
+  // Validate files-type input
+  if (filesType !== "whitelist" && filesType !== "blacklist") {
+    throw new Error("files-type must be either 'whitelist' or 'blacklist'");
+  }
 
   if (
     !sourcePath &&
@@ -12092,6 +12119,8 @@ async function getSettings() {
     decompressTarget,
     deleteFilesInDir,
     followSymbolicLinks,
+    filesType,
+    filesList,
   };
 }
 
@@ -12236,36 +12265,94 @@ async function deleteFile(serverId, targetFile) {
   } while (retries < 3);
 }
 
-async function deleteAllFilesInDirectory(serverId, targetPath) {
-  core.info(`Deleting all files in ${targetPath} on server ${serverId}`);
+/**
+ * Filters files based on whitelist/blacklist mode
+ * @param {Array} files - Array of file names
+ * @param {string} filesType - "whitelist" or "blacklist"
+ * @param {Array} filesList - Array of file names to include/exclude
+ * @returns {Array} - Filtered array of file names
+ */
+function filterFiles(files, filesType, filesList) {
+  if (!filesList || filesList.length === 0) {
+    // If no files specified, return all files for blacklist mode or empty for whitelist
+    return filesType === "blacklist" ? files : [];
+  }
+
+  // Support glob patterns in file names
+  const isMatch = (fileName, pattern) => {
+    if (!pattern.includes('*') && !pattern.includes('?')) {
+      // Exact match
+      return fileName === pattern;
+    }
+    
+    // Simple glob pattern matching
+    const regexPattern = pattern
+      .replace(/\./g, '\\.')
+      .replace(/\*/g, '.*')
+      .replace(/\?/g, '.');
+    
+    const regex = new RegExp(`^${regexPattern}$`, 'i');
+    return regex.test(fileName);
+  };
+
+  if (filesType === "whitelist") {
+    // Keep only files that match the patterns in the list
+    return files.filter(fileName =>
+      filesList.some(pattern => isMatch(fileName, pattern))
+    );
+  } else {
+    // blacklist mode - remove files that match the patterns in the list
+    return files.filter(fileName =>
+      !filesList.some(pattern => isMatch(fileName, pattern))
+    );
+  }
+}
+
+async function deleteFilesInDirectory(serverId, targetPath, filesType = "blacklist", filesList = []) {
+  core.info(`Deleting files in ${targetPath} on server ${serverId} (mode: ${filesType})`);
+  
+  if (filesList && filesList.length > 0) {
+    core.info(`File filter list: ${JSON.stringify(filesList)}`);
+  }
   
   try {
-    // Fix the API endpoint - use 'directory' parameter, not 'targetPath'
+    // Get list of files in directory
     const response = await axios.get(`/api/client/servers/${serverId}/files/list`, {
       params: { directory: targetPath },
     });
     
-    // Fix the filtering logic - check for files vs directories properly
-    const files = response.data.data || response.data; // Handle different API response structures
-    const fileNames = files
+    const files = response.data.data || response.data;
+    const allFileNames = files
       .filter(item => item.attributes ? !item.attributes.is_directory : !item.is_directory)
       .map(item => {
         const name = item.attributes ? item.attributes.name : item.name;
         return name;
       });
     
-    if (fileNames.length === 0) {
-      core.info(`No files to delete in ${targetPath}`);
+    if (allFileNames.length === 0) {
+      core.info(`No files found in ${targetPath}`);
       return;
     }
     
-    // Delete files with proper root directory
+    core.info(`Found ${allFileNames.length} files in directory: ${allFileNames.join(', ')}`);
+    
+    // Filter files based on whitelist/blacklist mode
+    const filesToDelete = filterFiles(allFileNames, filesType, filesList);
+    
+    if (filesToDelete.length === 0) {
+      core.info(`No files to delete after applying ${filesType} filter`);
+      return;
+    }
+    
+    core.info(`Files to delete (${filesType} mode): ${filesToDelete.join(', ')}`);
+    
+    // Delete the filtered files
     await axios.post(`/api/client/servers/${serverId}/files/delete`, {
       root: targetPath,
-      files: fileNames,
+      files: filesToDelete,
     });
     
-    core.info(`Deleted ${fileNames.length} files from ${targetPath}`);
+    core.info(`Successfully deleted ${filesToDelete.length} files from ${targetPath}`);
   } catch (error) {
     core.error(`Failed to delete files in directory: ${error.message}`);
     if (error.response) {
@@ -12273,6 +12360,11 @@ async function deleteAllFilesInDirectory(serverId, targetPath) {
     }
     throw error;
   }
+}
+
+// Keep the old function name for backward compatibility
+async function deleteAllFilesInDirectory(serverId, targetPath) {
+  return deleteFilesInDirectory(serverId, targetPath, "blacklist", []);
 }
 
 function getInput(name, options = { required: false }) {
@@ -12296,7 +12388,6 @@ async function readConfigFile() {
 }
 
 main();
-
 })();
 
 module.exports = __webpack_exports__;

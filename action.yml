@@ -40,6 +40,13 @@ inputs:
     description: "Delete all files in target folder"
     required: false
     default: false
+  files-type:
+    description: "Type of file filtering: 'whitelist' (keep only specified files) or 'blacklist' (delete only specified files)"
+    required: false
+    default: "blacklist"
+  files-list:
+    description: "List of files to include/exclude (one per line or comma-separated)"
+    required: false
   follow-symbolic-links:
     description: "Indicates whether to follow symbolic links"
     default: true
