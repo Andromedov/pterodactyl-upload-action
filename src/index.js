@@ -4,6 +4,7 @@ const fs = require("fs").promises;
 const path = require("path");
 const glob = require("@actions/glob");
 const tunnel = require("tunnel");
+const minimatch = require("minimatch");
 const { AxiosError } = require("axios");
 
 axios.defaults.headers.common.Accept = "application/json";
@@ -35,7 +36,12 @@ async function main() {
     for (const serverId of serverIds) {
       core.debug(`Uploading to server ${serverId}`);
       if (settings.deleteFilesInDir && targetPath.endsWith("/")) {
-        await deleteAllFilesInDirectory(serverId, targetPath);
+        await deleteAllFilesInDirectory(
+          serverId, 
+          targetPath,
+          settings.filesType,
+          settings.filesList
+        );
       }
       for (const source of fileSourcePaths) {
         core.debug(`Processing source ${source}`);
@@ -91,6 +97,11 @@ async function getSettings() {
   const decompressTarget = getInput("decompress-target") == "true";
   const deleteFilesInDir = getInput("delete-files-in-dir") == "true";
   const followSymbolicLinks = getInput("follow-symbolic-links") == "true";
+  const filesType = getInput("files-type") || "blacklist";
+  const filesListRaw = getInput("files-list");
+  const filesList = filesListRaw
+    ? filesListRaw.split(",").map(f => f.trim()).filter(f => f.length > 0)
+    : [];
 
   let sourcePath = getInput("source");
   let sourceListPath = getMultilineInput("sources");
@@ -157,6 +168,8 @@ async function getSettings() {
     targets,
     decompressTarget,
     deleteFilesInDir,
+    filesType,
+    filesList,
     followSymbolicLinks,
   };
 }
@@ -302,36 +315,63 @@ async function deleteFile(serverId, targetFile) {
   } while (retries < 3);
 }
 
-async function deleteAllFilesInDirectory(serverId, targetPath) {
-  core.info(`Deleting all files in ${targetPath} on server ${serverId}`);
-  
+function normalizePattern(p) {
+  return p.endsWith("/") ? p.slice(0, -1) : p;
+}
+
+function matchAnyPattern(name, relativePath, patterns) {
+  return patterns.some(pattern => {
+    const normalized = normalizePattern(pattern);
+    return minimatch(name, normalized, { matchBase: true }) ||
+           minimatch(relativePath, normalized, { matchBase: true });
+  });
+}
+
+async function deleteAllFilesInDirectory(serverId, targetPath, filesType = "blacklist", filesList = []) {
+  core.info(`Deleting files in ${targetPath} on server ${serverId} with ${filesType} mode`);
+
   try {
-    // Fix the API endpoint - use 'directory' parameter, not 'targetPath'
     const response = await axios.get(`/api/client/servers/${serverId}/files/list`, {
       params: { directory: targetPath },
     });
-    
-    // Fix the filtering logic - check for files vs directories properly
-    const files = response.data.data || response.data; // Handle different API response structures
-    const fileNames = files
-      .filter(item => item.attributes ? !item.attributes.is_directory : !item.is_directory)
-      .map(item => {
-        const name = item.attributes ? item.attributes.name : item.name;
-        return name;
-      });
-    
-    if (fileNames.length === 0) {
-      core.info(`No files to delete in ${targetPath}`);
-      return;
+
+    const items = response.data.data || response.data;
+    let namesToDelete = [];
+
+    for (const item of items) {
+      const isDir = item.attributes ? item.attributes.is_directory : item.is_directory;
+      const name = item.attributes ? item.attributes.name : item.name;
+      const relativePath = path.posix.join(targetPath.replace(/^\//, ""), name);
+
+      let shouldDelete;
+      if (filesList.length > 0) {
+        if (filesType.toLowerCase() === "whitelist") {
+          shouldDelete = !matchAnyPattern(name, relativePath, filesList);
+        } else {
+          shouldDelete = matchAnyPattern(name, relativePath, filesList);
+        }
+      } else {
+        shouldDelete = filesType.toLowerCase() === "whitelist" ? true : false;
+      }
+
+      if (shouldDelete) {
+        if (isDir) {
+          await deleteAllFilesInDirectory(serverId, `${targetPath}${name}/`, filesType, filesList);
+        }
+        namesToDelete.push(name);
+      }
     }
-    
-    // Delete files with proper root directory
-    await axios.post(`/api/client/servers/${serverId}/files/delete`, {
-      root: targetPath,
-      files: fileNames,
-    });
-    
-    core.info(`Deleted ${fileNames.length} files from ${targetPath}`);
+
+    if (namesToDelete.length > 0) {
+      await axios.post(`/api/client/servers/${serverId}/files/delete`, {
+        root: targetPath,
+        files: namesToDelete,
+      });
+      core.info(`Deleted ${namesToDelete.length} items from ${targetPath}`);
+    } else {
+      core.info(`No files to delete after applying ${filesType} filter`);
+    }
+
   } catch (error) {
     core.error(`Failed to delete files in directory: ${error.message}`);
     if (error.response) {
