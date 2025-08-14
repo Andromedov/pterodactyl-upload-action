@@ -12254,6 +12254,18 @@ function matchAnyPattern(name, patterns) {
   return patterns.some(pattern => minimatch(name, pattern, { matchBase: true }));
 }
 
+function normalizePattern(p) {
+  return p.endsWith("/") ? p.slice(0, -1) : p;
+}
+
+function matchAnyPattern(name, relativePath, patterns) {
+  return patterns.some(pattern => {
+    const normalized = normalizePattern(pattern);
+    return minimatch(name, normalized, { matchBase: true }) ||
+           minimatch(relativePath, normalized, { matchBase: true });
+  });
+}
+
 async function deleteAllFilesInDirectory(serverId, targetPath, filesType = "blacklist", filesList = []) {
   core.info(`Deleting files in ${targetPath} on server ${serverId} with ${filesType} mode`);
 
@@ -12263,21 +12275,19 @@ async function deleteAllFilesInDirectory(serverId, targetPath, filesType = "blac
     });
 
     const items = response.data.data || response.data;
-
     let namesToDelete = [];
 
     for (const item of items) {
       const isDir = item.attributes ? item.attributes.is_directory : item.is_directory;
       const name = item.attributes ? item.attributes.name : item.name;
-
-      const relativePath = path.join(targetPath, name);
+      const relativePath = path.posix.join(targetPath.replace(/^\//, ""), name);
 
       let shouldDelete;
       if (filesList.length > 0) {
         if (filesType.toLowerCase() === "whitelist") {
-          shouldDelete = !matchAnyPattern(name, filesList) && !matchAnyPattern(relativePath, filesList);
+          shouldDelete = !matchAnyPattern(name, relativePath, filesList);
         } else {
-          shouldDelete = matchAnyPattern(name, filesList) || matchAnyPattern(relativePath, filesList);
+          shouldDelete = matchAnyPattern(name, relativePath, filesList);
         }
       } else {
         shouldDelete = filesType.toLowerCase() === "whitelist" ? true : false;
