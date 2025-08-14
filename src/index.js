@@ -4,6 +4,7 @@ const fs = require("fs").promises;
 const path = require("path");
 const glob = require("@actions/glob");
 const tunnel = require("tunnel");
+const minimatch = require("minimatch");
 const { AxiosError } = require("axios");
 
 axios.defaults.headers.common.Accept = "application/json";
@@ -312,12 +313,6 @@ async function deleteFile(serverId, targetFile) {
       throw error;
     }
   } while (retries < 3);
-}
-
-const minimatch = require("minimatch");
-
-function matchAnyPattern(name, patterns) {
-  return patterns.some(pattern => minimatch(name, pattern, { matchBase: true }));
 }
 
 function normalizePattern(p) {

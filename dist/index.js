@@ -11938,6 +11938,7 @@ const fs = (__nccwpck_require__(7147).promises);
 const path = __nccwpck_require__(1017);
 const glob = __nccwpck_require__(8090);
 const tunnel = __nccwpck_require__(4294);
+const minimatch = __nccwpck_require__(3973);
 const { AxiosError } = __nccwpck_require__(8757);
 
 axios.defaults.headers.common.Accept = "application/json";
@@ -12246,12 +12247,6 @@ async function deleteFile(serverId, targetFile) {
       throw error;
     }
   } while (retries < 3);
-}
-
-const minimatch = __nccwpck_require__(3973);
-
-function matchAnyPattern(name, patterns) {
-  return patterns.some(pattern => minimatch(name, pattern, { matchBase: true }));
 }
 
 function normalizePattern(p) {

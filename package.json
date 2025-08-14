@@ -1,6 +1,6 @@
 {
   "name": "pterodactyl-upload-action",
-  "version": "2.5.3.3-BETA",
+  "version": "2.5.3",
   "description": "",
   "main": "index.js",
   "scripts": {
