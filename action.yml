@@ -45,8 +45,9 @@ inputs:
     required: false
     default: "blacklist"
   files-list:
-    description: "List of files to include/exclude (one per line or comma-separated)"
+    description: "Comma-separated list of files for whitelist/blacklist"
     required: false
+    default: ""
   follow-symbolic-links:
     description: "Indicates whether to follow symbolic links"
     default: true
