@@ -4,7 +4,8 @@ const fs = require("fs").promises;
 const path = require("path");
 const glob = require("@actions/glob");
 const tunnel = require("tunnel");
-const minimatch = require("minimatch");
+const { minimatch } = require("minimatch");
+const FormData = require("form-data");
 const { AxiosError } = require("axios");
 
 axios.defaults.headers.common.Accept = "application/json";
@@ -228,39 +229,55 @@ function getTargetFile(targetPath, source) {
 }
 
 async function uploadFile(serverId, targetFile, buffer) {
-  // check if the response was 403 (forbidden), try again until the max retries is reached
-  let retries = 0;
-  let uploaded = false;
-  while (!uploaded && retries < 3) {
+  const fileName = path.posix.basename(targetFile);
+  const parent = path.posix.dirname(targetFile);
+  const directory = parent === "." ? "/" : `/${parent.replace(/^\/+/, "")}`;
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      let response = await axios.post(
-        `/api/client/servers/${serverId}/files/write`,
-        buffer,
-        {
-          params: { file: targetFile },
-          onUploadProgress: (progressEvent) => {
+      const signedResponse = await axios.get(
+        `/api/client/servers/${serverId}/files/upload`
+      );
+      const signedUrl = signedResponse.data?.attributes?.url;
+      if (!signedUrl) throw new Error("Panel did not return a signed upload URL");
+
+      const form = new FormData();
+      form.append("files", buffer, { filename: fileName });
+      form.append("directory", directory);
+      await axios.post(signedUrl, form, {
+        params: { directory },
+        headers: { ...form.getHeaders(), Authorization: undefined },
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+        onUploadProgress: (progressEvent) => {
+          if (progressEvent.total) {
             const percentCompleted = Math.round(
               (progressEvent.loaded * 100) / progressEvent.total
             );
             core.info(
               `Uploading ${targetFile} to ${serverId} (${percentCompleted}%)`
             );
-          },
-        }
-      );
-      if (response?.status == 204) {
-        uploaded = true;
-      } else {
-        core.error(
-          `Upload failed with status ${response?.status}, retrying...`
-        );
-      }
+          }
+        },
+      });
+      return;
     } catch (error) {
-      core.error(`Upload failed with error ${error}, retrying...`);
-      core.debug(`Error response: ${JSON.stringify(error?.response?.data)}`);
+      lastError = error;
     }
-    retries++;
+
+    if (attempt < 3) {
+      core.warning(`Upload attempt ${attempt} failed: ${lastError.message}. Retrying...`);
+    }
   }
+
+  const apiErrors = lastError?.response?.data?.errors;
+  const details = Array.isArray(apiErrors)
+    ? apiErrors.map((error) => error.detail).filter(Boolean).join("; ")
+    : "";
+  throw new Error(
+    `Failed to upload ${targetFile} to server ${serverId} after 3 attempts: ` +
+    (details || lastError.message)
+  );
 }
 
 async function restartServer(serverId) {

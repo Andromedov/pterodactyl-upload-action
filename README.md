@@ -29,6 +29,8 @@ You have to create a client api key in the pterodactyl panel. You can do this in
 
 All file inputs support glob patterns.
 
+Uploads use a signed URL from the panel to send files directly to the server's Agent. The GitHub Actions runner must be able to reach the Agent URL configured in the panel. If `delete-files-in-dir` is enabled, matching files are removed before the upload starts; keep it disabled while testing a new deployment.
+
 ### Example Workflow Configuration
 
 ```yaml
