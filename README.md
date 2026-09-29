@@ -24,12 +24,24 @@ You have to create a client api key in the pterodactyl panel. You can do this in
 9. `command`: Execute command at server after successful upload.
 10. `proxy`: Proxy to be used for upload (username:password@host:port).
 11. `decompress-target`: Decompress archive file after upload in target.
-12. `delete-files-in-dir`: Delete all files in target folder.
-12. `follow-symbolic-links`: Indicates whether to follow symbolic links.
+12. `delete-files-in-dir`: Apply the file filter in the target folder before upload.
+13. `files-type`: `whitelist` keeps matches and deletes everything else; `blacklist` deletes matches.
+14. `files-list`: Comma-separated file or directory patterns, relative to `target`.
+15. `follow-symbolic-links`: Indicates whether to follow symbolic links.
 
 All file inputs support glob patterns.
 
 Uploads use a signed URL from the panel to send files directly to the server's Agent. The GitHub Actions runner must be able to reach the Agent URL configured in the panel. If `delete-files-in-dir` is enabled, matching files are removed before the upload starts; keep it disabled while testing a new deployment.
+
+File patterns are checked inside nested directories. A name such as `cache.yml` matches at any depth. A path such as `data/settings.yml` matches relative to `target`. Both `*/data/` and `**/data/` match every directory named `data`, including ones several levels below `target`. In whitelist mode, `data/` keeps every directory with that name and its contents, while `data/settings.yml` keeps only that file and its parent directories. In blacklist mode, a matching directory and all its contents are deleted. For example:
+
+Quote patterns starting with `*` in YAML, such as `files-list: '*/data/'`.
+
+```yaml
+delete-files-in-dir: true
+files-type: whitelist
+files-list: data/settings.yml,data/players/
+```
 
 ### Example Workflow Configuration
 

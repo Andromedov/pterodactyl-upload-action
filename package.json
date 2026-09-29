@@ -4,7 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "build": "ncc build src/index.js -o dist --source-map"
+    "build": "ncc build src/index.js -o dist --source-map",
+    "test": "node --test"
   },
   "keywords": [],
   "author": "",

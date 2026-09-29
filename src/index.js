@@ -4,8 +4,8 @@ const fs = require("fs").promises;
 const path = require("path");
 const glob = require("@actions/glob");
 const tunnel = require("tunnel");
-const { minimatch } = require("minimatch");
 const FormData = require("form-data");
+const { collectDeletionPlan } = require("./file-filter");
 const { AxiosError } = require("axios");
 
 axios.defaults.headers.common.Accept = "application/json";
@@ -332,60 +332,25 @@ async function deleteFile(serverId, targetFile) {
   } while (retries < 3);
 }
 
-function normalizePattern(p) {
-  return p.endsWith("/") ? p.slice(0, -1) : p;
-}
-
-function matchAnyPattern(name, relativePath, patterns) {
-  return patterns.some(pattern => {
-    const normalized = normalizePattern(pattern);
-    return minimatch(name, normalized, { matchBase: true }) ||
-           minimatch(relativePath, normalized, { matchBase: true });
-  });
-}
-
 async function deleteAllFilesInDirectory(serverId, targetPath, filesType = "blacklist", filesList = []) {
   core.info(`Deleting files in ${targetPath} on server ${serverId} with ${filesType} mode`);
 
   try {
-    const response = await axios.get(`/api/client/servers/${serverId}/files/list`, {
-      params: { directory: targetPath },
-    });
-
-    const items = response.data.data || response.data;
-    let namesToDelete = [];
-
-    for (const item of items) {
-      const isDir = item.attributes ? item.attributes.is_directory : item.is_directory;
-      const name = item.attributes ? item.attributes.name : item.name;
-      const relativePath = path.posix.join(targetPath.replace(/^\//, ""), name);
-
-      let shouldDelete;
-      if (filesList.length > 0) {
-        if (filesType.toLowerCase() === "whitelist") {
-          shouldDelete = !matchAnyPattern(name, relativePath, filesList);
-        } else {
-          shouldDelete = matchAnyPattern(name, relativePath, filesList);
-        }
-      } else {
-        shouldDelete = filesType.toLowerCase() === "whitelist" ? true : false;
-      }
-
-      if (shouldDelete) {
-        if (isDir) {
-          await deleteAllFilesInDirectory(serverId, `${targetPath}${name}/`, filesType, filesList);
-        }
-        namesToDelete.push(name);
-      }
-    }
-
-    if (namesToDelete.length > 0) {
-      await axios.post(`/api/client/servers/${serverId}/files/delete`, {
-        root: targetPath,
-        files: namesToDelete,
+    const operations = await collectDeletionPlan(async (directory) => {
+      const response = await axios.get(`/api/client/servers/${serverId}/files/list`, {
+        params: { directory },
       });
-      core.info(`Deleted ${namesToDelete.length} items from ${targetPath}`);
-    } else {
+      return response.data.data || response.data;
+    }, targetPath, filesType, filesList);
+
+    for (const { root, files } of operations) {
+      await axios.post(`/api/client/servers/${serverId}/files/delete`, {
+        root,
+        files,
+      });
+      core.info(`Deleted ${files.length} items from ${root}`);
+    }
+    if (operations.length === 0) {
       core.info(`No files to delete after applying ${filesType} filter`);
     }
 
