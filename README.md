@@ -56,7 +56,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4.2.2
       - run: echo "Hello world" > hello.txt
-      - uses: Andromedov/pterodactyl-upload-action@v2.5.2
+      - uses: Andromedov/pterodactyl-upload-action@v2.5.5
         with:
           panel-host: ${{ secrets.PANEL_HOST }}
           api-key: ${{ secrets.API_KEY }}

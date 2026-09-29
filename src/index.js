@@ -383,4 +383,10 @@ async function readConfigFile() {
   }
 }
 
-main();
+main().then(() => {
+  // All deployment requests are awaited in main(). An open HTTP socket must
+  // not keep this one-shot action running after its result has been printed.
+  process.stdout.write("", () => {
+    process.stderr.write("", () => process.exit(process.exitCode ?? 0));
+  });
+});
