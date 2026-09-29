@@ -35,6 +35,8 @@ Uploads use a signed URL from the panel to send files directly to the server's A
 
 File patterns are checked inside nested directories. A name such as `cache.yml` matches at any depth. A path such as `data/settings.yml` matches relative to `target`. Both `*/data/` and `**/data/` match every directory named `data`, including ones several levels below `target`. In whitelist mode, `data/` keeps every directory with that name and its contents, while `data/settings.yml` keeps only that file and its parent directories. In blacklist mode, a matching directory and all its contents are deleted. For example:
 
+When a nonempty whitelist matches nothing, the action stops before deleting any files.
+
 Quote patterns starting with `*` in YAML, such as `files-list: '*/data/'`.
 
 ```yaml

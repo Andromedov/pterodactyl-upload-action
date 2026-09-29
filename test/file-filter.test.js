@@ -5,6 +5,8 @@ const { collectDeletionPlan } = require("../src/file-filter");
 const target = "./plugins/CustomFishing/";
 const file = (name) => ({ attributes: { name, is_directory: false } });
 const directory = (name) => ({ attributes: { name, is_directory: true } });
+const apiFile = (name) => ({ attributes: { name, is_file: true, is_symlink: false } });
+const apiDirectory = (name) => ({ attributes: { name, is_file: false, is_symlink: false } });
 
 function listing(tree, visited) {
   return async (path) => {
@@ -105,6 +107,42 @@ test("*/data/ preserves data directories at every depth", async () => {
     { root: target, files: ["old.yml"] },
   ]);
   assert.equal(visited.some((directory) => directory.endsWith("/data/")), false);
+});
+
+test("Pterodactyl is_file responses preserve data directories", async () => {
+  const visited = [];
+  const tree = {
+    [target]: [apiDirectory("data"), apiDirectory("world"), apiFile("old.yml")],
+    "plugins/CustomFishing/world/": [apiDirectory("data"), apiFile("old.yml")],
+  };
+  const plan = await collectDeletionPlan(
+    listing(tree, visited), target, "whitelist", ["*/data/"]
+  );
+
+  assert.deepEqual(plan, [
+    { root: "plugins/CustomFishing/world/", files: ["old.yml"] },
+    { root: target, files: ["old.yml"] },
+  ]);
+  assert.equal(visited.some((directory) => directory.endsWith("/data/")), false);
+});
+
+test("whitelist aborts before deletion when no item matches", async () => {
+  const tree = {
+    [target]: [apiDirectory("data"), apiFile("old.yml")],
+    "plugins/CustomFishing/data/": [],
+  };
+  await assert.rejects(
+    collectDeletionPlan(listing(tree, []), target, "whitelist", ["missing/"]),
+    /Whitelist did not match/
+  );
+});
+
+test("unknown file type aborts before deletion", async () => {
+  const tree = { [target]: [{ attributes: { name: "data" } }] };
+  await assert.rejects(
+    collectDeletionPlan(listing(tree, []), target, "whitelist", ["data/"]),
+    /Cannot determine file type/
+  );
 });
 
 test("glob can match directories at any depth", async () => {

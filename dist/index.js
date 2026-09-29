@@ -11464,6 +11464,13 @@ function mayContainMatch(relativePath, serverPath, patterns) {
   });
 }
 
+function isDirectory(attributes) {
+  if (attributes.is_symlink === true) return false;
+  if (typeof attributes.is_directory === "boolean") return attributes.is_directory;
+  if (typeof attributes.is_file === "boolean") return !attributes.is_file;
+  throw new Error(`Cannot determine file type for ${attributes.name}`);
+}
+
 async function collectDeletionPlan(listDirectory, targetPath, filesType, filesList) {
   const mode = filesType.toLowerCase();
   if (mode !== "whitelist" && mode !== "blacklist") {
@@ -11478,21 +11485,22 @@ async function collectDeletionPlan(listDirectory, targetPath, filesType, filesLi
     const operations = [];
     const namesToDelete = [];
     let hasKeptItem = false;
+    let matchesFound = 0;
 
     for (const item of items) {
       const attributes = item.attributes || item;
       const { name } = attributes;
-      const isDirectory = attributes.is_directory;
+      const itemIsDirectory = isDirectory(attributes);
       const relativePath = path.posix.join(relativeDirectory, name);
       const serverPath = path.posix.join(basePath, relativePath);
       const matches = filesList.some((pattern) =>
-        matchesPattern(name, relativePath, serverPath, isDirectory, pattern)
+        matchesPattern(name, relativePath, serverPath, itemIsDirectory, pattern)
       );
 
       if (mode === "blacklist") {
         if (matches) {
           namesToDelete.push(name);
-        } else if (isDirectory) {
+        } else if (itemIsDirectory) {
           const child = await visit(`${path.posix.join(directory, name)}/`, relativePath);
           operations.push(...child.operations);
         }
@@ -11501,8 +11509,10 @@ async function collectDeletionPlan(listDirectory, targetPath, filesType, filesLi
 
       if (matches) {
         hasKeptItem = true;
-      } else if (isDirectory && mayContainMatch(relativePath, serverPath, filesList)) {
+        matchesFound++;
+      } else if (itemIsDirectory && mayContainMatch(relativePath, serverPath, filesList)) {
         const child = await visit(`${path.posix.join(directory, name)}/`, relativePath);
+        matchesFound += child.matchesFound;
         if (child.hasKeptItem) {
           hasKeptItem = true;
           operations.push(...child.operations);
@@ -11517,10 +11527,15 @@ async function collectDeletionPlan(listDirectory, targetPath, filesType, filesLi
     if (namesToDelete.length > 0) {
       operations.push({ root: directory, files: namesToDelete });
     }
-    return { hasKeptItem, operations };
+    return { hasKeptItem, matchesFound, operations };
   }
 
-  return (await visit(targetPath, "")).operations;
+  const plan = await visit(targetPath, "");
+  if (mode === "whitelist" && filesList.length > 0 &&
+      plan.operations.length > 0 && plan.matchesFound === 0) {
+    throw new Error("Whitelist did not match any server files; deletion stopped");
+  }
+  return plan.operations;
 }
 
 module.exports = { collectDeletionPlan };
