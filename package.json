@@ -15,7 +15,8 @@
     "@actions/glob": "^0.4.0",
     "axios": "^1.20.0",
     "form-data": "^4.0.6",
-    "minimatch": "^9.0.3"
+    "minimatch": "^9.0.3",
+    "yauzl": "^3.4.0"
   },
   "devDependencies": {
     "@vercel/ncc": "^0.36.1"

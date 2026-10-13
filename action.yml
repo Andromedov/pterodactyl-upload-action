@@ -52,6 +52,10 @@ inputs:
     description: "Maximum entries per cleanup DELETE request; 0 keeps one batch per directory. Failed deletes are never retried."
     required: false
     default: "0"
+  cleanup-dry-run:
+    description: "Validate sources and print the cleanup plan using listing requests only; stop without deletion, upload, decompression, commands or restart. Requires directory cleanup."
+    required: false
+    default: "false"
   follow-symbolic-links:
     description: "Follow local source symbolic links during globbing; remote cleanup never follows symbolic links"
     default: true

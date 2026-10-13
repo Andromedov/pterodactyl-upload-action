@@ -28,7 +28,7 @@ function apiDetails(error, secrets) {
 
 async function deleteAllFilesInDirectory({
   api, logger, serverId, targetPath, filesType = "blacklist", filesList = [],
-  deleteBatchSize = 0, secrets = [],
+  deleteBatchSize = 0, secrets = [], dryRun = false,
 }) {
   if (!Number.isSafeInteger(deleteBatchSize) || deleteBatchSize < 0) {
     throw new Error("delete-batch-size must be a nonnegative integer (0 keeps one batch per directory)");
@@ -65,7 +65,7 @@ async function deleteAllFilesInDirectory({
     }
   }
 
-  logger.info(`Deleting files in ${safe(targetPath)} on server ${safe(serverId)} with ${safe(filesType)} mode`);
+  logger.info(`${dryRun ? "Planning cleanup (dry-run)" : "Deleting files"} in ${safe(targetPath)} on server ${safe(serverId)} with ${safe(filesType)} mode`);
   // Finish all listing, schema validation and whitelist checks before the
   // first mutation. Failed listing must never become an empty directory.
   const operations = await collectDeletionPlan((directory) => request({
@@ -76,6 +76,13 @@ async function deleteAllFilesInDirectory({
     const size = deleteBatchSize || files.length;
     for (let offset = 0; offset < files.length; offset += size) {
       const batch = files.slice(offset, offset + size);
+      if (dryRun) {
+        logger.info(`Dry-run planned ${describe({ operation: "delete", method: "POST", endpoint: `${endpointRoot}/delete`, directory: root, files: batch })}`);
+        for (let index = 0; index < batch.length; index += 10) {
+          logger.info(`Dry-run files: directory=${JSON.stringify(safe(root))}; files=${JSON.stringify(batch.slice(index, index + 10).map((name) => safe(name, 256)))}`);
+        }
+        continue;
+      }
       await request({
         operation: "delete", method: "POST", endpoint: `${endpointRoot}/delete`, directory: root, files: batch,
       }, () => api.post(`${endpointRoot}/delete`, { root, files: batch }));

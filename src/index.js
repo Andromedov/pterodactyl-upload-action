@@ -2,12 +2,12 @@ const core = require("@actions/core");
 const axios = require("axios").default;
 const fs = require("fs").promises;
 const path = require("path");
-const glob = require("@actions/glob");
 const tunnel = require("tunnel");
 const FormData = require("form-data");
 const { deleteAllFilesInDirectory } = require("./directory-cleanup");
 const { normalizeServerPath } = require("./server-path");
 const { parseFilesList } = require("./file-filter");
+const { prepareUploads } = require("./upload-preflight");
 
 axios.defaults.headers.common.Accept = "application/json";
 
@@ -18,37 +18,29 @@ async function main() {
 
     const {
       serverIds,
-      sourceListPath,
       targetPath,
       restart,
       command,
-      targets,
       decompressTarget,
     } = settings;
 
-    let fileSourcePaths = [];
-    for (const source of sourceListPath) {
-      const globber = await glob.create(source, {
-        followSymbolicLinks: settings.followSymbolicLinks,
-      });
-      const files = await globber.glob();
-      fileSourcePaths = [...fileSourcePaths, ...files];
-    }
+    const uploads = await prepareUploads(settings);
+    core.info(`Preflight checked ${uploads.length} upload files before cleanup`);
 
     for (const serverId of serverIds) {
-      core.debug(`Uploading to server ${serverId}`);
+      core.debug(`Processing server ${serverId}`);
       if (settings.deleteFilesInDir && targetPath.endsWith("/")) {
         await deleteAllFilesInDirectory({
           api: axios, logger: core, serverId, targetPath,
           filesType: settings.filesType, filesList: settings.filesList,
           deleteBatchSize: settings.deleteBatchSize, secrets: [settings.apiKey, settings.proxy],
+          dryRun: settings.cleanupDryRun,
         });
       }
-      for (const source of fileSourcePaths) {
+      if (settings.cleanupDryRun) continue;
+
+      for (const { source, targetFile, buffer } of uploads) {
         core.debug(`Processing source ${source}`);
-        await validateSourceFile(source);
-        const targetFile = getTargetFile(targetPath, source);
-        const buffer = await fs.readFile(source);
 
         await uploadFile(serverId, targetFile, buffer);
 
@@ -58,32 +50,11 @@ async function main() {
         }
       }
 
-      for (const element of targets) {
-        core.debug(`Processing target ${JSON.stringify(element)}`);
-        const { source, target } = element;
-        const globber = await glob.create(source, {
-          followSymbolicLinks: settings.followSymbolicLinks,
-        });
-        const paths = await globber.glob();
-        for (const source of paths) {
-          await validateSourceFile(source);
-          const targetFile = getTargetFile(target, source);
-          const buffer = await fs.readFile(source);
-
-          await uploadFile(serverId, targetFile, buffer);
-
-          if (decompressTarget && isArchiveFile(targetFile)) {
-            await decompressFile(serverId, targetFile);
-            await deleteFile(serverId, targetFile);
-          }
-        }
-      }
-
       if (command != "") await sendConsoleCommand(serverId, command);
       if (restart) await restartServer(serverId);
     }
 
-    core.info("Done");
+    core.info(settings.cleanupDryRun ? "Cleanup dry-run complete; no deployment performed" : "Done");
   } catch (error) {
     core.setFailed(error.message);
   }
@@ -98,6 +69,7 @@ async function getSettings() {
   const proxy = getInput("proxy");
   const decompressTarget = getInput("decompress-target") == "true";
   const deleteFilesInDir = getInput("delete-files-in-dir") == "true";
+  const cleanupDryRun = getInput("cleanup-dry-run") == "true";
   const followSymbolicLinks = getInput("follow-symbolic-links") == "true";
   const filesType = getInput("files-type") || "blacklist";
   const filesListRaw = getInput("files-list");
@@ -159,6 +131,9 @@ async function getSettings() {
 
   if (sourcePath && !sourceListPath.length) sourceListPath = [sourcePath];
   if (serverIdInput && !serverIds.length) serverIds = [serverIdInput];
+  if (cleanupDryRun && (!deleteFilesInDir || !targetPath.endsWith("/"))) {
+    throw new Error("cleanup-dry-run requires delete-files-in-dir: true and a target ending with '/'");
+  }
 
   return {
     panelHost,
@@ -172,6 +147,7 @@ async function getSettings() {
     targets,
     decompressTarget,
     deleteFilesInDir,
+    cleanupDryRun,
     filesType,
     filesList,
     deleteBatchSize,
@@ -211,25 +187,9 @@ function configureAxios(panelHost, apiKey, proxy) {
   }
 }
 
-async function validateSourceFile(source) {
-  try {
-    const stats = await fs.lstat(source);
-    if (stats.isDirectory())
-      throw new Error("Source must be a file, not a directory");
-  } catch (error) {
-    throw new Error(`Source file ${source} does not exist.`);
-  }
-}
-
 function isArchiveFile(fileName) {
   const ext = path.extname(fileName).toLowerCase();
   return [".zip", ".tar", ".tar.gz", ".tgz", ".rar"].includes(ext);
-}
-
-function getTargetFile(targetPath, source) {
-  return normalizeServerPath(targetPath.endsWith("/")
-    ? path.posix.join(targetPath.replace(/\\/g, "/"), path.basename(source))
-    : targetPath);
 }
 
 async function uploadFile(serverId, targetFile, buffer) {

@@ -207,3 +207,22 @@ test("invalid batch sizes and parent traversal paths fail before any requests", 
   await assert.rejects(h.run({ targetPath: "plugins/../other/" }), /containing '\.\.'/);
   assert.equal(h.gets.length, 0);
 });
+
+test("dry-run includes every planned file, preserves whitelist and sends no DELETE", async () => {
+  const files = Array.from({ length: 25 }, (_, index) => `old-${index}.yml`);
+  const h = harness({ [target]: [dir("config"), dir("data"), ...files.map(file)] }, { postError: () => failure() });
+  await h.run({ dryRun: true });
+  assert.deepEqual(h.posts, []);
+  assert.match(h.logs.join("\n"), /Dry-run planned delete: POST.*batch_count=25/);
+  const preview = h.logs.filter((line) => line.startsWith("Dry-run files:"));
+  assert.equal(preview.length, 3);
+  assert.deepEqual(preview.flatMap((line) => JSON.parse(line.split("; files=")[1])), files);
+  assert.equal(h.logs.some((line) => line.startsWith("Deleted ")), false);
+});
+
+test("dry-run preserves the fail-closed whitelist rule", async () => {
+  const h = harness({ [target]: [file("old.yml")] });
+  await assert.rejects(h.run({ dryRun: true }), /Whitelist did not match/);
+  assert.deepEqual(h.posts, []);
+  assert.equal(h.logs.some((line) => line.startsWith("Dry-run planned")), false);
+});

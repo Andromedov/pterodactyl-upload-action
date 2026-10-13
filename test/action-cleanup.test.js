@@ -5,10 +5,12 @@ const { spawn } = require("node:child_process");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
+const zipFixtures = require("./fixtures/zip.json");
 
-async function runAction(targetPath, failingOperation) {
+async function runAction(targetPath, failingOperation, options = {}) {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "action-cleanup-"));
-  await fs.writeFile(path.join(tempDir, "deploy.zip"), "mock archive data");
+  await fs.writeFile(path.join(tempDir, "deploy.zip"), options.archive ?? Buffer.from(zipFixtures.stored, "base64"));
+  if (options.config) await fs.writeFile(path.join(tempDir, ".pterodactyl-upload.json"), JSON.stringify(options.config));
   const calls = [];
   let baseUrl;
   const server = http.createServer(async (request, response) => {
@@ -62,6 +64,8 @@ async function runAction(targetPath, failingOperation) {
         INPUT_COMMAND: "mythicmobs reload",
         INPUT_RESTART: "false",
         INPUT_PROXY: "",
+        "INPUT_CLEANUP-DRY-RUN": "false",
+        ...options.env,
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -84,6 +88,70 @@ async function runAction(targetPath, failingOperation) {
     await fs.rm(tempDir, { recursive: true, force: true });
   }
 }
+
+for (const [name, options] of [
+  ["missing ZIP", { env: { INPUT_SOURCE: "missing.zip" } }],
+  ["empty glob", { env: { INPUT_SOURCE: "missing-*.zip" } }],
+  ["unreadable-as-file directory", { env: { INPUT_SOURCE: "." } }],
+  ["malformed ZIP", { archive: Buffer.from("not a zip") }],
+  ["truncated ZIP", { archive: Buffer.from(zipFixtures.stored, "base64").subarray(0, 100) }],
+  ["missing later source", { env: { INPUT_SOURCES: "deploy.zip\nmissing.zip" } }],
+  ["missing config.targets source", { config: { targets: [{ source: "missing.zip", target: "./plugins/Other/" }] } }],
+]) {
+  test(`preflight rejects ${name} before any server requests`, async () => {
+    const { code, output, calls } = await runAction("./plugins/MythicMobs/", undefined, options);
+    assert.equal(code, 1, output);
+    assert.match(output, /cleanup not started/);
+    assert.doesNotMatch(output, /Done|Deleting files/);
+    assert.deepEqual(calls, []);
+  });
+}
+
+test("ZIP with damaged payload fails CRC preflight before cleanup", async () => {
+  const archive = Buffer.from(zipFixtures.stored, "base64");
+  archive[archive.indexOf("mock archive data")] ^= 1;
+  const { code, output, calls } = await runAction("./plugins/MythicMobs/", undefined, { archive });
+  assert.equal(code, 1, output);
+  assert.match(output, /ZIP CRC-32 mismatch/);
+  assert.deepEqual(calls, []);
+});
+
+test("dry-run prints cleanup for every server and performs no mutations or deployment", async () => {
+  const { code, output, calls } = await runAction("./plugins/MythicMobs/", undefined, {
+    env: { "INPUT_CLEANUP-DRY-RUN": "true", "INPUT_SERVER-IDS": "test\nsecond", INPUT_RESTART: "true" },
+  });
+  assert.equal(code, 0, output);
+  assert.match(output, /Preflight checked 1 upload files/);
+  assert.match(output, /Dry-run planned delete: POST/);
+  assert.match(output, /files=\["assets"\]/);
+  assert.match(output, /files=\["old.yml"\]/);
+  assert.match(output, /Cleanup dry-run complete; no deployment performed/);
+  assert.doesNotMatch(output, /Done|Deleted \d|Successfully deleted|Uploading/);
+  assert.equal(calls.length, 4);
+  assert.ok(calls.every(({ method, endpoint }) => method === "GET" && endpoint.endsWith("/list")));
+});
+
+test("dry-run with listing failure fails without mutations", async () => {
+  const { code, output, calls } = await runAction("./plugins/MythicMobs/", "listing", {
+    env: { "INPUT_CLEANUP-DRY-RUN": "true" },
+  });
+  assert.equal(code, 1, output);
+  assert.match(output, /HTTP status=500/);
+  assert.doesNotMatch(output, /Cleanup dry-run complete/);
+  assert.ok(calls.every(({ method }) => method === "GET"));
+});
+
+test("dry-run requires enabled directory cleanup", async () => {
+  for (const [targetPath, env] of [["./plugins/MythicMobs/", { "INPUT_DELETE-FILES-IN-DIR": "false" }],
+    ["./plugins/MythicMobs/deploy.zip", {}]]) {
+    const { code, output, calls } = await runAction(targetPath, undefined, {
+      env: { "INPUT_CLEANUP-DRY-RUN": "true", ...env },
+    });
+    assert.equal(code, 1, output);
+    assert.match(output, /cleanup-dry-run requires/);
+    assert.deepEqual(calls, []);
+  }
+});
 
 for (const spelling of ["./plugins/MythicMobs/", "plugins/MythicMobs/", "/plugins/MythicMobs/", "./"]) {
   test(`distributed action uses server POSIX paths throughout deployment for ${spelling}`, async () => {

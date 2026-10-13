@@ -29,6 +29,22 @@ You have to create a client api key in the pterodactyl panel. You can do this in
 14. `files-list`: Comma-separated file or directory patterns, relative to `target`.
 15. `follow-symbolic-links`: Follow local source symlinks during globbing. Remote cleanup never traverses symlinks.
 16. `delete-batch-size`: Maximum entries per cleanup DELETE request. Default `0` preserves one request per directory; a positive integer enables sequential bounded batches.
+17. `cleanup-dry-run`: Default `false`. Print the cleanup plan using listing requests only and stop before deletion or deployment. Requires `delete-files-in-dir: true` and a directory target ending with `/`.
+
+Before any server requests, preflight resolves every source pattern, including `config.targets`, requires at least one match per pattern and reads each regular source file. Missing files, empty globs, read errors and invalid targets stop the action before cleanup. Sources or destinations ending in `.zip` also undergo structure, decompressed-size and CRC-32 checks without extracting files. ZIP entries must use supported, unencrypted compression; other archive formats receive only file/readability checks.
+
+Upload uses the exact checked bytes even if a local file changes afterward. Buffers are retained until the action exits and shared when the same source is reused across targets or servers. Memory usage includes the total size of distinct source files.
+
+To review cleanup while validating the deployment sources:
+
+```yaml
+delete-files-in-dir: true
+cleanup-dry-run: true
+files-type: whitelist
+files-list: config/, data/, logs/
+```
+
+Dry-run applies the same whitelist checks and directory traversal as normal cleanup. It prints planned batches and all selected names in bounded log lines for every configured server. It sends only GET listing requests and finishes with `Cleanup dry-run complete; no deployment performed`. Upload, decompression, deletion, console commands and restart are skipped. To execute the reviewed deployment, set `cleanup-dry-run: false` on a subsequent run.
 
 The action uses Node.js 24, as required by current [GitHub Actions runtimes](https://github.blog/changelog/2026-09-23-node-20-is-no-longer-available-in-github-actions/). Self-hosted runners must support Node 24. Build and test locally with Node 24 using `npm ci`, `npm run build` and `npm test`.
 
