@@ -41,7 +41,7 @@ To review cleanup while validating the deployment sources:
 delete-files-in-dir: true
 cleanup-dry-run: true
 files-type: whitelist
-files-list: config/, data/, logs/
+files-list: ./config/, ./data/, ./logs/
 ```
 
 Dry-run applies the same whitelist checks and directory traversal as normal cleanup. It prints planned batches and all selected names in bounded log lines for every configured server. It sends only GET listing requests and finishes with `Cleanup dry-run complete; no deployment performed`. Upload, decompression, deletion, console commands and restart are skipped. To execute the reviewed deployment, set `cleanup-dry-run: false` on a subsequent run.
@@ -49,6 +49,10 @@ Dry-run applies the same whitelist checks and directory traversal as normal clea
 The action uses Node.js 24, as required by current [GitHub Actions runtimes](https://github.blog/changelog/2026-09-23-node-20-is-no-longer-available-in-github-actions/). Self-hosted runners must support Node 24. Build and test locally with Node 24 using `npm ci`, `npm run build` and `npm test`.
 
 Quote patterns starting with `*` in YAML, such as `files-list: '*/data/'`.
+
+Prefix patterns with `./` to anchor them to `target`: `./data/`, `./config/` and `./logs/` match only those directories directly inside the target and preserve their entire subtrees. A whitelist containing only these root directory patterns needs one root listing; other directories are planned for recursive deletion without listing their contents. Missing protected directories are allowed if another whitelist pattern matches; an empty whitelist or a nonempty target with no matches stops cleanup before deletion.
+
+Without `./`, existing matching is unchanged: `data/` matches directories named `data` at any depth, and `*/data/` keeps its any-depth shorthand. Anchored nested globs such as `./packs/**/keep.yml` match paths relative to the target. The same anchoring applies to blacklist patterns. Remote symlinks are never traversed: a matching directory whitelist preserves the link, while protection of descendants through a link stops cleanup.
 
 ```yaml
 delete-files-in-dir: true

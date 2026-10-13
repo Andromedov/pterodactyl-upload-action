@@ -45,7 +45,7 @@ inputs:
     required: false
     default: "blacklist"
   files-list:
-    description: "Comma-separated file or directory patterns; */data/ matches data directories at any depth"
+    description: "Comma-separated file or directory patterns; ./data/ matches only target/data, data/ and */data/ match data directories at any depth"
     required: false
     default: ""
   delete-batch-size:

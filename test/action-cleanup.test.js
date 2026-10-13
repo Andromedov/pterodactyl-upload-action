@@ -141,6 +141,22 @@ test("dry-run with listing failure fails without mutations", async () => {
   assert.ok(calls.every(({ method }) => method === "GET"));
 });
 
+test("distributed root-anchored dry-run needs one GET and never lists assets", async () => {
+  // The mock returns HTTP 500 for assets: an accidental recursive listing
+  // must fail this test rather than silently preserving the old traversal.
+  const { code, output, calls } = await runAction("./plugins/MythicMobs/", "listing", {
+    env: { "INPUT_CLEANUP-DRY-RUN": "true", "INPUT_FILES-LIST": "./config/, ./data/, ./logs/" },
+  });
+  assert.equal(code, 0, output);
+  assert.match(output, /files=\["assets"\]/);
+  assert.match(output, /files=\["old.yml"\]/);
+  assert.match(output, /Cleanup dry-run complete; no deployment performed/);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].method, "GET");
+  assert.equal(calls[0].endpoint, "/api/client/servers/test/files/list");
+  assert.equal(calls[0].directory, "/plugins/MythicMobs");
+});
+
 test("dry-run requires enabled directory cleanup", async () => {
   for (const [targetPath, env] of [["./plugins/MythicMobs/", { "INPUT_DELETE-FILES-IN-DIR": "false" }],
     ["./plugins/MythicMobs/deploy.zip", {}]]) {

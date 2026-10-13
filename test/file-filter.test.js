@@ -220,6 +220,132 @@ test("a matching empty directory counts as whitelist protection", async () => {
 
 const link = (name) => ({ attributes: { name, is_file: false, is_symlink: true } });
 
+test("root directory whitelist keeps only target children and skips unprotected trees", async () => {
+  const visited = [];
+  const tree = {
+    [target]: [apiDirectory("config"), apiDirectory("data"), apiDirectory("logs"), apiDirectory("assets"), apiFile("old")],
+    [`${target}/assets`]: [apiDirectory("data"), apiDirectory("config"), apiDirectory("logs")],
+  };
+  const plan = await collectDeletionPlan(listing(tree, visited), target, "whitelist", ["./config/", "./data/", "./logs/"]);
+  assert.deepEqual(plan, [{ root: target, files: ["assets", "old"] }]);
+  assert.deepEqual(visited, [target]);
+});
+
+test("root directory whitelist does not match regular files with the same name", async () => {
+  const visited = [];
+  const tree = { [target]: [apiDirectory("data"), apiFile("config"), apiFile("logs")] };
+  const plan = await collectDeletionPlan(listing(tree, visited), target, "whitelist", ["./config/", "./data/", "./logs/"]);
+  assert.deepEqual(plan, [{ root: target, files: ["config", "logs"] }]);
+  assert.deepEqual(visited, [target]);
+});
+
+test("root anchoring coexists with legacy directory and nested glob protections", async () => {
+  const visited = [];
+  const tree = {
+    [target]: [apiDirectory("config"), apiDirectory("packs"), apiDirectory("assets"), apiFile("old")],
+    [`${target}/packs`]: [apiDirectory("world"), apiDirectory("config")],
+    [`${target}/packs/world`]: [apiFile("keep.yml"), apiFile("old"), apiDirectory("data")],
+    [`${target}/packs/config`]: [apiFile("old")],
+    [`${target}/assets`]: [apiDirectory("logs"), apiFile("old")],
+    [`${target}/assets/logs`]: [],
+    [`${target}/packs/world/data`]: [apiFile("old")],
+  };
+  const plan = await collectDeletionPlan(listing(tree, visited), target, "whitelist",
+    ["./config/", "data/", "./packs/**/keep.{yml,json}"]);
+  assert.deepEqual(plan, [
+    { root: `${target}/packs/world`, files: ["old"] },
+    { root: `${target}/packs`, files: ["config"] },
+    { root: target, files: ["assets", "old"] },
+  ]);
+  assert.deepEqual(visited, [target, `${target}/packs`, `${target}/packs/world`, `${target}/packs/config`, `${target}/assets`, `${target}/assets/logs`]);
+});
+
+test("anchored brace paths keep nested matches and prune unrelated branches", async () => {
+  const visited = [];
+  const tree = {
+    [target]: [apiDirectory("a"), apiDirectory("c"), apiDirectory("assets")],
+    [`${target}/a`]: [apiDirectory("b"), apiDirectory("other")],
+    [`${target}/c`]: [apiDirectory("d")],
+    [`${target}/a/b`]: [apiFile("keep.yml"), apiFile("old")],
+    [`${target}/c/d`]: [apiFile("keep.json")],
+  };
+  const plan = await collectDeletionPlan(listing(tree, visited), target, "whitelist", ["./{a/b,c/d}/keep.{yml,json}"]);
+  assert.deepEqual(plan, [
+    { root: `${target}/a/b`, files: ["old"] },
+    { root: `${target}/a`, files: ["other"] },
+    { root: target, files: ["assets"] },
+  ]);
+  assert.equal(visited.length, 5);
+});
+
+test("anchored single-star directory glob retains its target-relative depth", async () => {
+  const visited = [];
+  const tree = {
+    [target]: [apiDirectory("data"), apiDirectory("packs")],
+    [`${target}/data`]: [],
+    [`${target}/packs`]: [apiDirectory("data"), apiDirectory("world")],
+  };
+  const plan = await collectDeletionPlan(listing(tree, visited), target, "whitelist", ["./*/data/"]);
+  assert.deepEqual(plan, [
+    { root: `${target}/packs`, files: ["world"] },
+    { root: target, files: ["data"] },
+  ]);
+  assert.deepEqual(visited, [target, `${target}/data`, `${target}/packs`]);
+});
+
+test("anchored patterns never fall back to absolute server paths", async () => {
+  const visited = [];
+  const tree = { [target]: [apiDirectory("data"), apiDirectory("config")] };
+  const plan = await collectDeletionPlan(listing(tree, visited), target, "whitelist", ["./data/", `.${target}/config/`]);
+  assert.deepEqual(plan, [{ root: target, files: ["config"] }]);
+  assert.deepEqual(visited, [target]);
+});
+
+test("anchored blacklist deletes root directories and nested glob files without matching nested names", async () => {
+  const visited = [];
+  const tree = {
+    [target]: [apiDirectory("data"), apiDirectory("packs"), link("logs")],
+    [`${target}/packs`]: [apiDirectory("data"), apiDirectory("world")],
+    [`${target}/packs/data`]: [apiFile("keep.yml")],
+    [`${target}/packs/world`]: [apiFile("old.yml"), apiFile("keep.json")],
+  };
+  const plan = await collectDeletionPlan(listing(tree, visited), target, "blacklist", ["./data/", "./logs/", "./packs/**/old.*"]);
+  assert.deepEqual(plan, [
+    { root: `${target}/packs/world`, files: ["old.yml"] },
+    { root: target, files: ["data"] },
+  ]);
+  assert.deepEqual(visited, [target, `${target}/packs`, `${target}/packs/data`, `${target}/packs/world`]);
+});
+
+test("root directory whitelist preserves matching symlinks and removes unrelated links without traversal", async () => {
+  const visited = [];
+  const tree = { [target]: [link("data"), link("assets"), apiFile("old")] };
+  const plan = await collectDeletionPlan(listing(tree, visited), target, "whitelist", ["./data/", "./logs/"]);
+  assert.deepEqual(plan, [{ root: target, files: ["assets", "old"] }]);
+  assert.deepEqual(visited, [target]);
+});
+
+test("anchored nested protection under a symlink fails without following it", async () => {
+  const visited = [];
+  const tree = { [target]: [apiDirectory("data"), link("packs")] };
+  await assert.rejects(collectDeletionPlan(listing(tree, visited), target, "whitelist", ["./data/", "./packs/**/keep.yml"]),
+    /Cannot verify whitelist descendants through symbolic link/);
+  assert.deepEqual(visited, [target]);
+});
+
+test("empty whitelist fails before listing", async () => {
+  const visited = [];
+  await assert.rejects(collectDeletionPlan(listing({}, visited), target, "whitelist", []), /Whitelist is empty/);
+  assert.deepEqual(visited, []);
+});
+
+test("missing root protections fail closed with one listing even when matching nested names exist", async () => {
+  const visited = [];
+  const tree = { [target]: [apiDirectory("assets")], [`${target}/assets`]: [apiDirectory("data")] };
+  await assert.rejects(collectDeletionPlan(listing(tree, visited), target, "whitelist", ["./data/"]), /Whitelist did not match/);
+  assert.deepEqual(visited, [target]);
+});
+
 test("directory whitelist preserves a matching symlink without following it", async () => {
   const tree = { [target]: [link("data"), link("cache"), apiFile("old")] };
   const visited = [];

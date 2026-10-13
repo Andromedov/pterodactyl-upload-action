@@ -1,5 +1,5 @@
 const path = require("path");
-const { minimatch } = require("minimatch");
+const { Minimatch } = require("minimatch");
 const { normalizeServerPath } = require("./server-path");
 
 const matchOptions = { dot: true, nonegate: true, nocomment: true };
@@ -22,35 +22,39 @@ function parseFilesList(value) {
   return patterns.filter(Boolean);
 }
 
-function normalizePattern(pattern) {
+function compilePattern(pattern) {
   if (typeof pattern !== "string") throw new Error("File patterns must be strings");
-  const normalized = pattern.trim().replace(/\\/g, "/").replace(/^(?:\.\/|\/)+/, "");
+  const spelling = pattern.trim().replace(/\\/g, "/");
+  const rootAnchored = spelling.startsWith("./");
+  let normalized = spelling.replace(/^(?:\.\/|\/)+/, "");
   if (!normalized || normalized.includes("\0") || normalized.split("/").includes("..")) {
     throw new Error("File patterns must be nonempty and cannot contain NUL or '..'");
   }
-  return normalized.startsWith("*/") ? `**/${normalized.slice(2)}` : normalized;
+  // Preserve the legacy any-depth shorthand only for unanchored patterns.
+  if (!rootAnchored && normalized.startsWith("*/")) normalized = `**/${normalized.slice(2)}`;
+  const directoryOnly = normalized.endsWith("/");
+  const match = directoryOnly ? normalized.slice(0, -1) : normalized;
+  return { rootAnchored, directoryOnly, hasPath: match.includes("/"),
+    matcher: new Minimatch(match, matchOptions) };
 }
 
 function matchesPattern(name, relativePath, serverPath, isDirectory, pattern) {
-  const normalized = normalizePattern(pattern);
-  const directoryOnly = normalized.endsWith("/");
-  const match = directoryOnly ? normalized.slice(0, -1) : normalized;
-  if (!match || (directoryOnly && !isDirectory)) return false;
+  const { rootAnchored, directoryOnly, hasPath, matcher } = pattern;
+  if (directoryOnly && !isDirectory) return false;
+  if (rootAnchored) return matcher.match(relativePath);
 
-  return match.includes("/")
-    ? minimatch(relativePath, match, matchOptions) || minimatch(serverPath, match, matchOptions)
-    : minimatch(name, match, matchOptions);
+  return hasPath
+    ? matcher.match(relativePath) || matcher.match(serverPath)
+    : matcher.match(name);
 }
 
 function mayContainMatch(relativePath, serverPath, patterns) {
   return patterns.some((pattern) => {
-    const normalized = normalizePattern(pattern);
-    const match = normalized.replace(/\/$/, "");
-    if (!match.includes("/")) return true;
+    const { rootAnchored, hasPath, matcher } = pattern;
+    if (!rootAnchored && !hasPath) return true;
     // Let minimatch expand braces/globstars before testing prefixes. Splitting
     // the raw pattern on '/' can miss protected paths like {a/b,c/d}/keep.yml.
-    const options = { ...matchOptions, partial: true };
-    return minimatch(relativePath, match, options) || minimatch(serverPath, match, options);
+    return matcher.match(relativePath, true) || (!rootAnchored && matcher.match(serverPath, true));
   });
 }
 
@@ -94,7 +98,7 @@ async function collectDeletionPlan(listDirectory, targetPath, filesType, filesLi
   if (mode === "whitelist" && filesList.length === 0) {
     throw new Error("Whitelist is empty; deletion stopped");
   }
-  filesList = filesList.map(normalizePattern);
+  filesList = filesList.map(compilePattern);
   if (mode === "blacklist" && filesList.length === 0) return [];
 
   const basePath = normalizeServerPath(targetPath);
@@ -131,7 +135,7 @@ async function collectDeletionPlan(listDirectory, targetPath, filesType, filesLi
         hasKeptItem = true;
         matchesFound++;
       } else if (attributes.is_symlink === true && filesList.some((pattern) =>
-        pattern.replace(/\/$/, "").includes("/") && mayContainMatch(relativePath, serverPath, [pattern]))) {
+        pattern.hasPath && mayContainMatch(relativePath, serverPath, [pattern]))) {
         throw new Error(`Cannot verify whitelist descendants through symbolic link ${JSON.stringify(serverPath)}; deletion stopped`);
       } else if (itemIsDirectory && mayContainMatch(relativePath, serverPath, filesList)) {
         const child = await visit(path.posix.join(directory, name), relativePath);

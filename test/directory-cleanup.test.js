@@ -69,6 +69,40 @@ test("deeply nested protected directories keep all contents and ancestors; empty
     { root: `${target}/packs`, files: ["old.yml"] },
     { root: target, files: ["old.yml"] },
   ]);
+  assert.equal(h.gets.length, 5);
+});
+
+for (const depth of [0, 10, 400]) {
+  test(`MythicMobs root-anchored dry-run uses one GET with ${depth} nested directories`, async () => {
+    const removable = ["assets", "generation", "mobs", "skills", "settings.yml"];
+    const tree = {
+      [target]: [dir("config"), dir("data"), ...removable.slice(0, -1).map(dir), file("settings.yml")],
+    };
+    for (const name of removable.slice(0, -1)) tree[`${target}/${name}`] = [];
+    let root = `${target}/generation`;
+    tree[root] = [dir("resource_pack")];
+    root += "/resource_pack";
+    for (let index = 0; index < depth; index++) {
+      tree[root] = [dir(`nested-${index}`), dir("config"), dir("data"), dir("logs")];
+      root += `/nested-${index}`;
+    }
+    tree[root] = [dir("data")];
+    const h = harness(tree, { postError: () => failure("Dry-run must not delete") });
+    await h.run({ dryRun: true, filesList: ["./config/", "./data/", "./logs/"] });
+    assert.deepEqual(h.gets, [{ endpoint: "/api/client/servers/test/files/list", directory: target }]);
+    assert.deepEqual(h.posts, []);
+    const preview = h.logs.filter((line) => line.startsWith("Dry-run files:"));
+    assert.equal(preview.length, 1);
+    assert.deepEqual(JSON.parse(preview[0].split("; files=")[1]), removable);
+  });
+}
+
+test("anchored dry-run with no root match stops after one GET without a deletion preview", async () => {
+  const h = harness({ [target]: [dir("assets")], [`${target}/assets`]: [dir("data")] });
+  await assert.rejects(h.run({ dryRun: true, filesList: ["./config/", "./data/", "./logs/"] }), /Whitelist did not match/);
+  assert.equal(h.gets.length, 1);
+  assert.deepEqual(h.posts, []);
+  assert.equal(h.logs.some((line) => line.startsWith("Dry-run planned")), false);
 });
 
 for (const spelling of ["./plugins/MythicMobs/", "plugins/MythicMobs/", "/plugins/MythicMobs/",
