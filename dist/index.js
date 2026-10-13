@@ -11426,14 +11426,134 @@ exports.debug = debug; // for test
 
 /***/ }),
 
+/***/ 2524:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const { collectDeletionPlan, validateListing } = __nccwpck_require__(4513);
+const { normalizeServerPath } = __nccwpck_require__(2706);
+
+function safeText(value, secrets, limit = 500) {
+  let text = String(value);
+  for (const secret of secrets.filter(Boolean).sort((a, b) => b.length - a.length)) {
+    text = text.split(secret).join("[redacted]");
+  }
+  // Error details can echo credentials or signed URLs. Never log request
+  // configs, response headers, full response objects or arbitrary HTML bodies.
+  text = text.replace(/https?:\/\/[^\s"'<>]+/gi, "[URL redacted]")
+    .replace(/\b(Bearer|Basic)\s+[^\s"'<>]+/gi, "$1 [redacted]")
+    .replace(/\b(token|api[-_]?key|authorization|password|signature)["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;"'<>]+)/gi, "$1=[redacted]");
+  text = text.replace(/[\x00-\x1f\x7f]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
+  return text.length > limit ? `${text.slice(0, limit)}...` : text;
+}
+
+function apiDetails(error, secrets) {
+  const data = error.response?.data;
+  const details = Array.isArray(data?.errors)
+    ? data.errors.slice(0, 3).map((item) =>
+      [item?.code, item?.detail].filter((value) => typeof value === "string")
+        .map((value) => safeText(value, secrets, 200)).join(": ")).filter(Boolean)
+    : [data?.error, data?.message].filter((value) => typeof value === "string")
+      .map((value) => safeText(value, secrets, 200));
+  return details.length ? details.join("; ") : safeText(error.message || "No API error details provided", secrets);
+}
+
+async function deleteAllFilesInDirectory({
+  api, logger, serverId, targetPath, filesType = "blacklist", filesList = [],
+  deleteBatchSize = 0, secrets = [],
+}) {
+  if (!Number.isSafeInteger(deleteBatchSize) || deleteBatchSize < 0) {
+    throw new Error("delete-batch-size must be a nonnegative integer (0 keeps one batch per directory)");
+  }
+  const target = normalizeServerPath(targetPath);
+  const endpointRoot = `/api/client/servers/${encodeURIComponent(serverId)}/files`;
+  const safe = (value, limit) => safeText(value, secrets, limit);
+  const describe = ({ operation, method, endpoint, directory, files }) => {
+    const names = files?.slice(0, 10).map((name) => safe(name, 80));
+    const summary = names ? `${JSON.stringify(names)}${files.length > names.length ? ` (+${files.length - names.length} more)` : ""}` : "n/a";
+    return `${operation}: ${method} ${safe(endpoint)}; target=${JSON.stringify(safe(target))}; ` +
+      `directory=${JSON.stringify(safe(directory))}; batch_count=${files?.length ?? 0}; files=${summary}`;
+  };
+
+  async function request(context, operation) {
+    const description = describe(context);
+    let status;
+    if (context.operation === "delete") logger.info(`Cleanup ${description}`);
+    else logger.debug(`Cleanup ${description}`);
+    try {
+      const response = await operation();
+      status = response.status;
+      if (context.operation === "listing") {
+        const items = Array.isArray(response.data) ? response.data : response.data?.data;
+        return validateListing(items, context.directory);
+      }
+      if (response.status !== 204) throw new Error("Expected HTTP 204 confirming deletion");
+    } catch (error) {
+      const failureStatus = error.response?.status ?? status ?? "unavailable";
+      const safety = context.operation === "delete"
+        ? "Batch may have been partially deleted; it was not retried. Cleanup incomplete; upload stopped."
+        : "Cleanup planning stopped before any deletions; upload stopped.";
+      throw new Error(`Cleanup ${description} failed; HTTP status=${failureStatus}; details=${apiDetails(error, secrets)}. ${safety}`);
+    }
+  }
+
+  logger.info(`Deleting files in ${safe(targetPath)} on server ${safe(serverId)} with ${safe(filesType)} mode`);
+  // Finish all listing, schema validation and whitelist checks before the
+  // first mutation. Failed listing must never become an empty directory.
+  const operations = await collectDeletionPlan((directory) => request({
+    operation: "listing", method: "GET", endpoint: `${endpointRoot}/list`, directory,
+  }, () => api.get(`${endpointRoot}/list`, { params: { directory } })), target, filesType, filesList);
+
+  for (const { root, files } of operations) {
+    const size = deleteBatchSize || files.length;
+    for (let offset = 0; offset < files.length; offset += size) {
+      const batch = files.slice(offset, offset + size);
+      await request({
+        operation: "delete", method: "POST", endpoint: `${endpointRoot}/delete`, directory: root, files: batch,
+      }, () => api.post(`${endpointRoot}/delete`, { root, files: batch }));
+      logger.info(`Deleted ${batch.length} items from ${safe(root)}`);
+    }
+  }
+  if (!operations.length) logger.info(`No files to delete after applying ${safe(filesType)} filter`);
+}
+
+module.exports = { deleteAllFilesInDirectory };
+
+
+/***/ }),
+
 /***/ 4513:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 const path = __nccwpck_require__(1017);
 const { minimatch } = __nccwpck_require__(4501);
+const { normalizeServerPath } = __nccwpck_require__(2706);
+
+const matchOptions = { dot: true, nonegate: true, nocomment: true };
+
+function parseFilesList(value) {
+  const patterns = [];
+  let start = 0;
+  const groups = [];
+  for (let index = 0; index < value.length; index++) {
+    const character = value[index];
+    const closing = { "{": "}", "[": "]", "(": ")" }[character];
+    if (closing && groups[groups.length - 1] !== "]") groups.push(closing);
+    else if (character === groups[groups.length - 1]) groups.pop();
+    else if (character === "," && groups.length === 0) {
+      patterns.push(value.slice(start, index).trim());
+      start = index + 1;
+    }
+  }
+  patterns.push(value.slice(start).trim());
+  return patterns.filter(Boolean);
+}
 
 function normalizePattern(pattern) {
-  const normalized = pattern.trim().replace(/\\/g, "/").replace(/^\.?\//, "");
+  if (typeof pattern !== "string") throw new Error("File patterns must be strings");
+  const normalized = pattern.trim().replace(/\\/g, "/").replace(/^(?:\.\/|\/)+/, "");
+  if (!normalized || normalized.includes("\0") || normalized.split("/").includes("..")) {
+    throw new Error("File patterns must be nonempty and cannot contain NUL or '..'");
+  }
   return normalized.startsWith("*/") ? `**/${normalized.slice(2)}` : normalized;
 }
 
@@ -11443,10 +11563,9 @@ function matchesPattern(name, relativePath, serverPath, isDirectory, pattern) {
   const match = directoryOnly ? normalized.slice(0, -1) : normalized;
   if (!match || (directoryOnly && !isDirectory)) return false;
 
-  const options = { dot: true };
   return match.includes("/")
-    ? minimatch(relativePath, match, options) || minimatch(serverPath, match, options)
-    : minimatch(name, match, options);
+    ? minimatch(relativePath, match, matchOptions) || minimatch(serverPath, match, matchOptions)
+    : minimatch(name, match, matchOptions);
 }
 
 function mayContainMatch(relativePath, serverPath, patterns) {
@@ -11454,13 +11573,10 @@ function mayContainMatch(relativePath, serverPath, patterns) {
     const normalized = normalizePattern(pattern);
     const match = normalized.replace(/\/$/, "");
     if (!match.includes("/")) return true;
-    const parts = match.split("/");
-    for (let length = 1; length < parts.length; length++) {
-      const prefix = parts.slice(0, length).join("/");
-      if (minimatch(relativePath, prefix, { dot: true }) ||
-          minimatch(serverPath, prefix, { dot: true })) return true;
-    }
-    return false;
+    // Let minimatch expand braces/globstars before testing prefixes. Splitting
+    // the raw pattern on '/' can miss protected paths like {a/b,c/d}/keep.yml.
+    const options = { ...matchOptions, partial: true };
+    return minimatch(relativePath, match, options) || minimatch(serverPath, match, options);
   });
 }
 
@@ -11471,17 +11587,46 @@ function isDirectory(attributes) {
   throw new Error(`Cannot determine file type for ${attributes.name}`);
 }
 
+function validateListing(items, directory) {
+  if (!Array.isArray(items)) throw new Error(`Invalid file listing for ${JSON.stringify(directory)}: expected an array`);
+  const seen = new Set();
+  for (const item of items) {
+    const attributes = item?.attributes ?? item;
+    const name = attributes?.name;
+    if (typeof name !== "string" || !name || name === "." || name === ".." || /[/\\\0]/.test(name)) {
+      throw new Error(`Invalid file name in listing for ${JSON.stringify(directory)}: expected a single path component`);
+    }
+    if (seen.has(name)) throw new Error(`Duplicate file name ${JSON.stringify(name)} in ${JSON.stringify(directory)}`);
+    seen.add(name);
+    for (const field of ["is_file", "is_directory", "is_symlink"]) {
+      if (field in attributes && typeof attributes[field] !== "boolean") {
+        throw new Error(`Invalid ${field} for ${JSON.stringify(name)} in ${JSON.stringify(directory)}: expected a boolean`);
+      }
+    }
+    if (typeof attributes.is_directory === "boolean" && typeof attributes.is_file === "boolean" &&
+        attributes.is_directory === attributes.is_file && attributes.is_symlink !== true) {
+      throw new Error(`Conflicting file type for ${JSON.stringify(name)} in ${JSON.stringify(directory)}`);
+    }
+    isDirectory(attributes);
+  }
+  return items;
+}
+
 async function collectDeletionPlan(listDirectory, targetPath, filesType, filesList) {
   const mode = filesType.toLowerCase();
   if (mode !== "whitelist" && mode !== "blacklist") {
     throw new Error("files-type must be whitelist or blacklist");
   }
+  if (mode === "whitelist" && filesList.length === 0) {
+    throw new Error("Whitelist is empty; deletion stopped");
+  }
+  filesList = filesList.map(normalizePattern);
   if (mode === "blacklist" && filesList.length === 0) return [];
 
-  const basePath = path.posix.normalize(targetPath.replace(/\\/g, "/"));
+  const basePath = normalizeServerPath(targetPath);
 
   async function visit(directory, relativeDirectory) {
-    const items = await listDirectory(directory);
+    const items = validateListing(await listDirectory(directory), directory);
     const operations = [];
     const namesToDelete = [];
     let hasKeptItem = false;
@@ -11492,17 +11637,18 @@ async function collectDeletionPlan(listDirectory, targetPath, filesType, filesLi
       const { name } = attributes;
       const itemIsDirectory = isDirectory(attributes);
       const relativePath = path.posix.join(relativeDirectory, name);
-      const serverPath = path.posix.join(basePath, relativePath);
+      const serverPath = path.posix.join(basePath, relativePath).replace(/^\//, "");
       const matches = filesList.some((pattern) =>
-        matchesPattern(name, relativePath, serverPath, itemIsDirectory, pattern)
+        matchesPattern(name, relativePath, serverPath,
+          itemIsDirectory || (mode === "whitelist" && attributes.is_symlink === true), pattern)
       );
 
       if (mode === "blacklist") {
         if (matches) {
           namesToDelete.push(name);
         } else if (itemIsDirectory) {
-          const child = await visit(`${path.posix.join(directory, name)}/`, relativePath);
-          operations.push(...child.operations);
+          const child = await visit(path.posix.join(directory, name), relativePath);
+          for (const operation of child.operations) operations.push(operation);
         }
         continue;
       }
@@ -11510,12 +11656,15 @@ async function collectDeletionPlan(listDirectory, targetPath, filesType, filesLi
       if (matches) {
         hasKeptItem = true;
         matchesFound++;
+      } else if (attributes.is_symlink === true && filesList.some((pattern) =>
+        pattern.replace(/\/$/, "").includes("/") && mayContainMatch(relativePath, serverPath, [pattern]))) {
+        throw new Error(`Cannot verify whitelist descendants through symbolic link ${JSON.stringify(serverPath)}; deletion stopped`);
       } else if (itemIsDirectory && mayContainMatch(relativePath, serverPath, filesList)) {
-        const child = await visit(`${path.posix.join(directory, name)}/`, relativePath);
+        const child = await visit(path.posix.join(directory, name), relativePath);
         matchesFound += child.matchesFound;
         if (child.hasKeptItem) {
           hasKeptItem = true;
-          operations.push(...child.operations);
+          for (const operation of child.operations) operations.push(operation);
         } else {
           namesToDelete.push(name);
         }
@@ -11530,7 +11679,7 @@ async function collectDeletionPlan(listDirectory, targetPath, filesType, filesLi
     return { hasKeptItem, matchesFound, operations };
   }
 
-  const plan = await visit(targetPath, "");
+  const plan = await visit(basePath, "");
   if (mode === "whitelist" && filesList.length > 0 &&
       plan.operations.length > 0 && plan.matchesFound === 0) {
     throw new Error("Whitelist did not match any server files; deletion stopped");
@@ -11538,7 +11687,29 @@ async function collectDeletionPlan(listDirectory, targetPath, filesType, filesLi
   return plan.operations;
 }
 
-module.exports = { collectDeletionPlan };
+module.exports = { collectDeletionPlan, validateListing, parseFilesList };
+
+
+/***/ }),
+
+/***/ 2706:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const path = __nccwpck_require__(1017);
+
+// These are paths within the game server, never paths on the runner's OS.
+function normalizeServerPath(value) {
+  if (typeof value !== "string" || !value || value.includes("\0")) {
+    throw new Error("Server path must be a nonempty string without NUL characters");
+  }
+  const posixPath = value.replace(/\\/g, "/");
+  if (posixPath.split("/").includes("..")) {
+    throw new Error("Server paths containing '..' are not allowed");
+  }
+  return path.posix.resolve("/", posixPath);
+}
+
+module.exports = { normalizeServerPath };
 
 
 /***/ }),
@@ -20599,8 +20770,9 @@ const path = __nccwpck_require__(1017);
 const glob = __nccwpck_require__(8090);
 const tunnel = __nccwpck_require__(4294);
 const FormData = __nccwpck_require__(4334);
-const { collectDeletionPlan } = __nccwpck_require__(4513);
-const { AxiosError } = __nccwpck_require__(8757);
+const { deleteAllFilesInDirectory } = __nccwpck_require__(2524);
+const { normalizeServerPath } = __nccwpck_require__(2706);
+const { parseFilesList } = __nccwpck_require__(4513);
 
 axios.defaults.headers.common.Accept = "application/json";
 
@@ -20631,12 +20803,11 @@ async function main() {
     for (const serverId of serverIds) {
       core.debug(`Uploading to server ${serverId}`);
       if (settings.deleteFilesInDir && targetPath.endsWith("/")) {
-        await deleteAllFilesInDirectory(
-          serverId, 
-          targetPath,
-          settings.filesType,
-          settings.filesList
-        );
+        await deleteAllFilesInDirectory({
+          api: axios, logger: core, serverId, targetPath,
+          filesType: settings.filesType, filesList: settings.filesList,
+          deleteBatchSize: settings.deleteBatchSize, secrets: [settings.apiKey, settings.proxy],
+        });
       }
       for (const source of fileSourcePaths) {
         core.debug(`Processing source ${source}`);
@@ -20686,6 +20857,7 @@ async function main() {
 async function getSettings() {
   const panelHost = getInput("panel-host", { required: true });
   const apiKey = getInput("api-key", { required: true });
+  core.setSecret(apiKey);
   const restart = getInput("restart") == "true";
   const command = getInput("command");
   const proxy = getInput("proxy");
@@ -20694,9 +20866,11 @@ async function getSettings() {
   const followSymbolicLinks = getInput("follow-symbolic-links") == "true";
   const filesType = getInput("files-type") || "blacklist";
   const filesListRaw = getInput("files-list");
-  const filesList = filesListRaw
-    ? filesListRaw.split(",").map(f => f.trim()).filter(f => f.length > 0)
-    : [];
+  const filesList = parseFilesList(filesListRaw);
+  const deleteBatchSize = Number(getInput("delete-batch-size") || "0");
+  if (!Number.isSafeInteger(deleteBatchSize) || deleteBatchSize < 0) {
+    throw new Error("delete-batch-size must be a nonnegative integer");
+  }
 
   let sourcePath = getInput("source");
   let sourceListPath = getMultilineInput("sources");
@@ -20765,6 +20939,7 @@ async function getSettings() {
     deleteFilesInDir,
     filesType,
     filesList,
+    deleteBatchSize,
     followSymbolicLinks,
   };
 }
@@ -20817,15 +20992,15 @@ function isArchiveFile(fileName) {
 }
 
 function getTargetFile(targetPath, source) {
-  return targetPath.endsWith("/")
-    ? path.join(targetPath, path.basename(source))
-    : targetPath;
+  return normalizeServerPath(targetPath.endsWith("/")
+    ? path.posix.join(targetPath.replace(/\\/g, "/"), path.basename(source))
+    : targetPath);
 }
 
 async function uploadFile(serverId, targetFile, buffer) {
   const fileName = path.posix.basename(targetFile);
   const parent = path.posix.dirname(targetFile);
-  const directory = parent === "." ? "/" : `/${parent.replace(/^\/+/, "")}`;
+  const directory = normalizeServerPath(parent);
   let lastError;
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
@@ -20887,9 +21062,8 @@ async function sendConsoleCommand(serverId, command) {
 }
 
 async function decompressFile(serverId, targetFile) {
-  const rootDir = path.dirname(targetFile);
-  const fileName = path.basename(targetFile);
-  const apiRoot = rootDir === '.' ? '/' : rootDir;
+  const apiRoot = path.posix.dirname(normalizeServerPath(targetFile));
+  const fileName = path.posix.basename(targetFile);
   await axios.post(`/api/client/servers/${serverId}/files/decompress`, {
     root: apiRoot,
     file: fileName,
@@ -20906,8 +21080,8 @@ async function deleteFile(serverId, targetFile) {
       response = await axios.post(
         `/api/client/servers/${serverId}/files/delete`,
         {
-          root: "/",
-          files: [targetFile],
+          root: path.posix.dirname(normalizeServerPath(targetFile)),
+          files: [path.posix.basename(targetFile)],
         }
       );
       
@@ -20924,37 +21098,6 @@ async function deleteFile(serverId, targetFile) {
       throw error;
     }
   } while (retries < 3);
-}
-
-async function deleteAllFilesInDirectory(serverId, targetPath, filesType = "blacklist", filesList = []) {
-  core.info(`Deleting files in ${targetPath} on server ${serverId} with ${filesType} mode`);
-
-  try {
-    const operations = await collectDeletionPlan(async (directory) => {
-      const response = await axios.get(`/api/client/servers/${serverId}/files/list`, {
-        params: { directory },
-      });
-      return response.data.data || response.data;
-    }, targetPath, filesType, filesList);
-
-    for (const { root, files } of operations) {
-      await axios.post(`/api/client/servers/${serverId}/files/delete`, {
-        root,
-        files,
-      });
-      core.info(`Deleted ${files.length} items from ${root}`);
-    }
-    if (operations.length === 0) {
-      core.info(`No files to delete after applying ${filesType} filter`);
-    }
-
-  } catch (error) {
-    core.error(`Failed to delete files in directory: ${error.message}`);
-    if (error.response) {
-      core.debug(`API Error: ${JSON.stringify(error.response.data)}`);
-    }
-    throw error;
-  }
 }
 
 function getInput(name, options = { required: false }) {

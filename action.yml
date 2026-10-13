@@ -48,11 +48,15 @@ inputs:
     description: "Comma-separated file or directory patterns; */data/ matches data directories at any depth"
     required: false
     default: ""
+  delete-batch-size:
+    description: "Maximum entries per cleanup DELETE request; 0 keeps one batch per directory. Failed deletes are never retried."
+    required: false
+    default: "0"
   follow-symbolic-links:
-    description: "Indicates whether to follow symbolic links"
+    description: "Follow local source symbolic links during globbing; remote cleanup never follows symbolic links"
     default: true
 runs:
-  using: "node16"
+  using: "node24"
   main: "dist/index.js"
 
 branding:
